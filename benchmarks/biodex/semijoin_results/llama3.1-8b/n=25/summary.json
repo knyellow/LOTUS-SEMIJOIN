@@ -1,0 +1,52 @@
+{
+  "reactions": [
+    "Drug-induced liver injury",
+    "Hepatic function abnormal",
+    "Hepatotoxicity",
+    "Liver injury",
+    "Hepatic failure",
+    "Hepatic enzyme increased",
+    "Acute hepatic failure",
+    "Hepatitis",
+    "Immune-mediated hepatitis",
+    "Hepatic necrosis"
+  ],
+  "runs": {
+    "join_full": {
+      "method": "join_full",
+      "n_articles": 25,
+      "n_reactions": 10,
+      "n_gold": 0,
+      "vs_labels": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "n_pred": 21
+      },
+      "lm_calls": 250,
+      "time_s": 1224.4,
+      "join_rows": 91
+    },
+    "join_cascade": {
+      "method": "join_cascade",
+      "n_articles": 25,
+      "n_reactions": 10,
+      "n_gold": 0,
+      "vs_labels": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "n_pred": 16
+      },
+      "lm_calls": 355,
+      "time_s": 1995.0,
+      "join_rows": 54,
+      "vs_join_full": {
+        "precision": 1.0,
+        "recall": 0.7619,
+        "f1": 0.8649,
+        "n_pred": 16
+      }
+    }
+  }
+}
