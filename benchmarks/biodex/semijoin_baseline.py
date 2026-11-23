@@ -107,7 +107,7 @@ class CountingLM(LM):
 LLM_MODEL = os.environ.get("LLM_MODEL", "hosted_vllm/llama3.1-8b")
 
 
-def configure(with_retriever: bool = True) -> CountingLM:
+def lm_config() -> dict:
     if LLM_MODEL.startswith("hosted_vllm/"):
         # local llama-server
         endpoint = {
@@ -117,7 +117,11 @@ def configure(with_retriever: bool = True) -> CountingLM:
     else:
         # hosted API (e.g. gpt-4o-mini-2024-07-18), reads OPENAI_API_KEY
         endpoint = {"max_batch_size": 64}
-    lm = CountingLM(model=LLM_MODEL, temperature=0.0, max_tokens=256, **endpoint)
+    return dict(model=LLM_MODEL, temperature=0.0, max_tokens=256, **endpoint)
+
+
+def configure(with_retriever: bool = True) -> CountingLM:
+    lm = CountingLM(**lm_config())
     rm = SentenceTransformersRM(model="intfloat/e5-base-v2", max_batch_size=64, device="cpu") if with_retriever else None
     lotus.settings.configure(lm=lm, rm=rm, vs=FaissVS())
     return lm

@@ -33,7 +33,8 @@ You can find example results I ran earlier in biodex_results/Mar-17-25, which ga
 ## BioLORD article-level negative pruning
 
 Run these commands from `benchmarks/biodex` in the existing LOTUS environment.
-Install the benchmark loader with `pip install datasets` if needed. The runner
+Install this checkout and the loader with `python -m pip install -e ../.. datasets`.
+The runner
 uses LOTUS's `SentenceTransformersRM` and the existing pairwise early-stop executor.
 Set `REACTION_SET=liver` (default) or `haematologic`, and use the same `PROMPT`,
 `LLM_MODEL`, `LLM_API_BASE`, `LLM_BATCH`, and `EARLY_WORKERS` as the team's control.
@@ -81,7 +82,9 @@ completed run with the same score file and enough evaluated articles for the new
 threshold. In particular, it can evaluate a more aggressive threshold from the
 conservative run. It refuses to invent results for previously pruned articles.
 Replay labels calls as replayed logical pair evaluations and records its source
-manifest. Live results count logical pair evaluations, following the team baseline;
+manifest, including the threshold's manual/calibration origin. It checks the
+source threshold, completed progress, article results, and summary before reuse.
+Live results count logical pair evaluations, following the team baseline;
 provider retries are outside that counter. `estimated_embedding_plus_run_time_s`
 sums model initialization/embedding/scoring time and the current run through result
 assembly. Dataset loading in the score command and output serialization are outside

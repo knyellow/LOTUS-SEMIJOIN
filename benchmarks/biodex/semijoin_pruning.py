@@ -29,6 +29,11 @@ def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def distinct_output(output: Path, inputs: list[Path]) -> None:
+    if output.resolve() in {path.resolve() for path in inputs}:
+        raise ValueError("Output must differ from the input and source result files.")
+
+
 def article_digest(articles) -> str:
     return digest(articles[["_qid", "patient_description", "reactions_list"]].to_dict("records"))
 
@@ -138,6 +143,7 @@ def calibrate(scores: dict, target: float) -> dict:
 
 
 def calibrate_file(args) -> None:
+    distinct_output(args.output, [args.scores])
     scores = load_scores(args.scores)
     if scores["split"] != "validation":
         raise ValueError("Choose thresholds on validation scores before evaluating test data.")
@@ -152,20 +158,27 @@ def calibrate_file(args) -> None:
     )
 
 
-def threshold_from_args(args, scores: dict) -> float:
+def threshold_from_args(args, scores: dict) -> tuple[float, dict]:
     if args.calibration is None:
         threshold = args.threshold
+        source = {"kind": "manual"}
     else:
         calibration = read_json(args.calibration)
         if calibration["scorer"] != scores["scorer"] or calibration["reactions"] != scores["reactions"]:
             raise ValueError("Calibration must use the same model, representation, and reaction panel.")
         threshold = calibration["policies"][args.policy]["threshold"]
+        source = {
+            "kind": "validation_calibration",
+            "policy": args.policy,
+            "calibration_sha256": digest(calibration),
+            "validation_input_sha256": calibration["validation_input_sha256"],
+        }
     if threshold is None or not math.isfinite(threshold):
         raise ValueError("A finite threshold or calibration file is required.")
-    return threshold
+    return threshold, source
 
 
-def read_progress(path: Path) -> list[dict]:
+def read_progress(path: Path, repair: bool = True) -> list[dict]:
     if not path.exists():
         return []
     payload = path.read_bytes()
@@ -175,13 +188,13 @@ def read_progress(path: Path) -> list[dict]:
         try:
             records.append(json.loads(line))
         except (json.JSONDecodeError, UnicodeDecodeError):
-            if index != len(lines) - 1 or line.endswith(b"\n"):
+            if not repair or index != len(lines) - 1 or line.endswith(b"\n"):
                 raise ValueError("Progress contains a corrupt completed record.") from None
             # A killed writer may leave only its final record incomplete.
             with path.open("r+b") as stream:
                 stream.truncate(len(payload) - len(line))
             return records
-    if payload and not payload.endswith(b"\n"):
+    if repair and payload and not payload.endswith(b"\n"):
         with path.open("ab") as stream:
             stream.write(b"\n")
     return records
@@ -303,7 +316,7 @@ def run_locked(args) -> None:
 
     started = time.perf_counter()
     scores = load_scores(args.scores)
-    threshold = threshold_from_args(args, scores)
+    threshold, threshold_source = threshold_from_args(args, scores)
     if scores["split"] != "test":
         raise ValueError("Run the LLM evaluation on test scores.")
     articles = baseline.load_articles(len(scores["articles"]), split=scores["split"])
@@ -312,16 +325,28 @@ def run_locked(args) -> None:
         or article_digest(articles) != scores["input_sha256"]
     ):
         raise ValueError("The loaded dataset or reaction panel differs from the score file.")
+    model_config = baseline.lm_config()
+    provider = model_config["model"].split("/", 1)[0].upper() if "/" in model_config["model"] else "OPENAI"
+    if model_config["model"].startswith("claude"):
+        provider = "ANTHROPIC"
+    provider_endpoints = {
+        key: os.environ.get(key)
+        for key in (f"{provider}_API_BASE", f"{provider}_BASE_URL", f"{provider}_API_VERSION")
+        if "api_base" not in model_config
+    }
     manifest = {
         "scores_sha256": digest(scores),
         "threshold": threshold,
-        "model": baseline.LLM_MODEL,
+        "threshold_source": threshold_source,
+        "model": model_config["model"],
         "instruction": baseline.JOIN_INSTRUCTION,
-        "max_tokens": 256,
-        "temperature": 0.0,
+        "max_tokens": model_config["max_tokens"],
+        "temperature": model_config["temperature"],
         "workers": baseline.EARLY_WORKERS,
-        "llm_batch": os.environ.get("LLM_BATCH", "4"),
-        "endpoint_sha256": digest(os.environ.get("LLM_API_BASE", "http://localhost:8080/v1")),
+        "llm_batch": model_config["max_batch_size"],
+        "endpoint_sha256": digest(
+            {"explicit": model_config.get("api_base"), "provider_environment": provider_endpoints}
+        ),
     }
     manifest_path = args.output_dir / "manifest.json"
     if manifest_path.exists():
@@ -344,7 +369,9 @@ def run_locked(args) -> None:
             raise ValueError("Completed results exist but their progress is incomplete; restore the progress file.")
         records = apply_gate(scores, previous, threshold)
         summary = read_json(summary_path)
-        if any(summary.get(key) != value for key, value in summarize(records).items()):
+        if summary.get("threshold") != threshold or any(
+            summary.get(key) != value for key, value in summarize(records).items()
+        ):
             raise ValueError("Saved result artifacts disagree with the completed progress.")
         if articles_path.exists() and read_json(articles_path) != records:
             raise ValueError("Saved article results disagree with the completed progress.")
@@ -377,20 +404,39 @@ def run_locked(args) -> None:
 
 
 def replay(args) -> None:
+    inputs = [
+        args.scores,
+        *(args.source_dir / name for name in ["manifest.json", "progress.jsonl", "articles.json", "summary.json"]),
+    ]
+    if args.calibration is not None:
+        inputs.append(args.calibration)
+    distinct_output(args.output, inputs)
     scores = load_scores(args.scores)
     manifest = read_json(args.source_dir / "manifest.json")
     if manifest["scores_sha256"] != digest(scores):
         raise ValueError("Replay requires exactly the same scores as the source run.")
-    source = read_json(args.source_dir / "articles.json")
-    # A completed source is required even when the new threshold prunes missing rows.
-    if {row["_qid"] for row in source} != {row["_qid"] for row in scores["articles"]}:
-        raise ValueError("Replay requires a completed source run.")
-    threshold = threshold_from_args(args, scores)
+    source_threshold = manifest["threshold"]
+    source_progress = read_progress(args.source_dir / "progress.jsonl", repair=False)
+    expected_ids = {row["_qid"] for row in scores["articles"] if keep_article(row["scores"], source_threshold)}
+    if {row["_qid"] for row in source_progress} != expected_ids or any(
+        row.get("pruned", False) for row in source_progress
+    ):
+        raise ValueError("Replay requires the completed source run's evaluated progress.")
+    source = apply_gate(scores, source_progress, source_threshold)
+    source_summary = read_json(args.source_dir / "summary.json")
+    if (
+        read_json(args.source_dir / "articles.json") != source
+        or source_summary.get("threshold") != source_threshold
+        or any(source_summary.get(key) != value for key, value in summarize(source).items())
+    ):
+        raise ValueError("Source results disagree with their original threshold or completed progress.")
+    threshold, threshold_source = threshold_from_args(args, scores)
     records = apply_gate(scores, source, threshold)
     summary = summarize(records)
     summary.update(
         {
             "threshold": threshold,
+            "threshold_source": threshold_source,
             "replay": True,
             "estimated_embedding_plus_run_time_s": None,
             "lm_calls_kind": "replayed_logical_pair_evaluations",
