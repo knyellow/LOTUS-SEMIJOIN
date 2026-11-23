@@ -32,6 +32,8 @@ You can find example results I ran earlier in biodex_results/Mar-17-25, which ga
 
 ## BioLORD article-level negative pruning
 
+[한국어 코드 설명과 지표·서버 실행 안내](NEGATIVE_PRUNING_GUIDE.ko.md)는 작은 코드 단위와 전체 호출 경로를 설명합니다. 지표별 저장 위치와 실제 전체 실행시간을 수집하는 명령도 포함합니다.
+
 Run these commands from `benchmarks/biodex` in the existing LOTUS environment.
 Install this checkout and the loader with `python -m pip install -e ../.. datasets`.
 The runner
