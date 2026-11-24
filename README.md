@@ -150,6 +150,18 @@ For more, you can checkout the official [docs](https://lotus-ai.readthedocs.io/e
 - [Optimizations](https://lotus-ai.readthedocs.io/en/latest/lazyframe.html) — the query engine, cascades, and lazy execution
 - [Supported Models](https://lotus-ai.readthedocs.io/en/latest/llm.html) — LMs, retrievers, rerankers (any [LiteLLM](https://litellm.vercel.app) provider)
 
+## BioDEX semi-join experiments (팀 프로젝트)
+
+[한국어 코드 설명과 서버 실행 명령](benchmarks/biodex/NEGATIVE_PRUNING_GUIDE.ko.md)
+
+| 실험 | Proxy | Negative pruning |
+|---|---|---|
+| 3 | E5-base-v2 | 없음 |
+| 4 | BioLORD-2023 | 없음 |
+| 5 | BioLORD-2023 | Validation에서 정한 threshold 적용 |
+
+세 실험은 같은 abstract 조각을 임베딩하고 라벨별 최대 cosine similarity 순서로 기존 조기 종료를 실행합니다. LLM 입력은 기존 본문 앞 8,000자를 유지합니다. 4·5번은 같은 BioLORD 점수 파일을 사용하며, 완료된 4번으로 두 threshold의 호출 수·F1을 추가 LLM 호출 없이 재생할 수 있습니다. 실제 실행시간은 5번을 별도로 실행해 측정합니다.
+
 ## Community
 Join us on [Discord][#discord] to ask questions and share what you're building.
 

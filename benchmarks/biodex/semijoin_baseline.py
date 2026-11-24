@@ -127,12 +127,16 @@ def configure(with_retriever: bool = True) -> CountingLM:
     return lm
 
 
-def load_articles(n: int | None, split: str = "test") -> pd.DataFrame:
+def load_articles(n: int | None, split: str = "test", include_abstract: bool = False) -> pd.DataFrame:
     df = load_dataset("BioDEX/BioDEX-Reactions", split=split).to_pandas()[:n].reset_index(drop=True)
     df["reactions_list"] = df["reactions"].apply(lambda x: [r.strip() for r in x.split(",")])
     df["patient_description"] = df["fulltext_processed"].apply(lambda x: x[:TRUNCATION_LIMIT])
     df["_qid"] = df.index
-    return df[["_qid", "title", "patient_description", "reactions_list"]]
+    columns = ["_qid", "title", "patient_description", "reactions_list"]
+    if include_abstract:
+        df["abstract"] = df["abstract"].fillna("")
+        columns.append("abstract")
+    return df[columns]
 
 
 def semi_join(articles: pd.DataFrame, reactions: pd.DataFrame, cascade_args: CascadeArgs | None):

@@ -30,71 +30,55 @@ You can find example results I ran earlier in biodex_results/Mar-17-25, which ga
 +-------------------------+--------+---------+-------------+
 ```
 
-## BioLORD article-level negative pruning
+## Abstract proxy 기반 semi-join: 실험 3·4·5
 
-[한국어 코드 설명과 지표·서버 실행 안내](NEGATIVE_PRUNING_GUIDE.ko.md)는 작은 코드 단위와 전체 호출 경로를 설명합니다. 지표별 저장 위치와 실제 전체 실행시간을 수집하는 명령도 포함합니다.
+[한국어 코드 설명·지표·전체 서버 명령](NEGATIVE_PRUNING_GUIDE.ko.md)에서 작은 코드 단위와 호출 경로를 확인할 수 있습니다.
 
-Run these commands from `benchmarks/biodex` in the existing LOTUS environment.
-Install this checkout and the loader with `python -m pip install -e ../.. datasets`.
-The runner
-uses LOTUS's `SentenceTransformersRM` and the existing pairwise early-stop executor.
-Set `REACTION_SET=liver` (default) or `haematologic`, and use the same `PROMPT`,
-`LLM_MODEL`, `LLM_API_BASE`, `LLM_BATCH`, and `EARLY_WORKERS` as the team's control.
+| 실험 | Proxy 모델 | Pruning |
+|---|---|---|
+| 3 | E5-base-v2 | 없음 |
+| 4 | BioLORD-2023 | 없음 |
+| 5 | BioLORD-2023 | 최대 라벨 점수가 threshold 미만이면 논문 전체 생략 |
+
+Proxy는 **abstract 전체를 같은 조각으로 나누어** 임베딩합니다. 각 조각은 E5·BioLORD 양쪽 tokenizer에서 special token과 E5 `passage: ` 접두어까지 포함해 128토큰 이내입니다. 조각은 겹치지 않고 원문 전체를 보존합니다. 논문–라벨 점수는 각 조각의 정규화 cosine similarity 중 최댓값입니다. E5 라벨에는 `query: ` 접두어를 붙이고 BioLORD에는 접두어를 사용하지 않습니다. LLM 입력은 모든 조건에서 기존 **`fulltext_processed[:8000]`**입니다.
+
+기존 LOTUS `SentenceTransformersRM`과 팀의 pairwise 조기 종료 실행기를 재사용합니다. 아래는 `benchmarks/biodex`에서 실행하는 최소 예시입니다. 먼저 `python -m pip install -e ../.. datasets`로 현재 checkout을 설치하고 LLM 서버를 실행합니다. `REACTION_SET`, `PROMPT`, `LLM_MODEL`, `LLM_API_BASE`, `LLM_BATCH`, `EARLY_WORKERS`는 비교군과 동일하게 맞춥니다. 혈액 패널은 `REACTION_SET=haematologic`과 별도 출력 경로를 사용합니다.
 
 ```bash
-# Score once on validation and test; neither command calls the LLM.
-python semijoin_pruning.py score --split validation --output validation_scores.json
-python semijoin_pruning.py calibrate validation_scores.json --output thresholds.json
-python semijoin_pruning.py score --split test --n-articles 250 --output test_scores.json
+export REACTION_SET=liver
+R=pruning_results/liver_paper
+mkdir -p "$R"
 
-# Experiment 5: one live run with the conservative validation threshold.
-python semijoin_pruning.py run test_scores.json --calibration thresholds.json \
-  --policy conservative --output-dir pruning_results/conservative
+# 준비: validation BioLORD + threshold, test E5/BioLORD. LLM 호출 0회.
+python semijoin_pruning.py score --model biolord --split validation --device cuda \
+  --output "$R/validation_biolord.json"
+python semijoin_pruning.py calibrate "$R/validation_biolord.json" --output "$R/thresholds.json"
+python semijoin_pruning.py score --model e5 --split test --n-articles 250 --device cuda \
+  --output "$R/test_e5.json"
+python semijoin_pruning.py score --model biolord --split test --n-articles 250 --device cuda \
+  --output "$R/test_biolord.json"
 
-# Evaluate the second threshold from that completed run, with zero new LLM calls.
-python semijoin_pruning.py replay test_scores.json --calibration thresholds.json \
-  --policy retain_95 --source-dir pruning_results/conservative --output retain_95.json
+# 3·4번: threshold 없이 모든 논문을 정렬된 순서로 평가.
+python semijoin_pruning.py run "$R/test_e5.json" --experiment 3 --output-dir "$R/experiment3"
+python semijoin_pruning.py run "$R/test_biolord.json" --experiment 4 --output-dir "$R/experiment4"
+
+# 5번의 두 threshold: 완료된 4번 결과로 재생. 추가 LLM 호출 0회.
+python semijoin_pruning.py replay "$R/test_biolord.json" --calibration "$R/thresholds.json" \
+  --policy conservative --source-dir "$R/experiment4" --output "$R/experiment5_conservative_replay.json"
+python semijoin_pruning.py replay "$R/test_biolord.json" --calibration "$R/thresholds.json" \
+  --policy retain_95 --source-dir "$R/experiment4" --output "$R/experiment5_retain95_replay.json"
+
+# 5번 실제 실행: 선택한 정책의 wall time은 이 명령을 별도로 실측.
+python semijoin_pruning.py run "$R/test_biolord.json" --experiment 5 \
+  --calibration "$R/thresholds.json" --policy conservative --output-dir "$R/experiment5_conservative"
 ```
 
-The proxy embeds each article's existing first 8,000 characters and each reaction
-label once, normalizes the vectors, and takes their dot product (cosine similarity).
-BioLORD's native maximum input length is recorded in the score file (currently
-128 tokens). This initial implementation uses that document prefix, so the control
-must use the same representation and scores. `--device cuda` selects GPU embedding.
+CPU 임베딩은 `--device cpu`로 지정합니다. 위 test 앞 250편을 바꾸면 E5·BioLORD 양쪽에 같은 개수를 사용합니다. 모델별 test 점수의 `input_sha256`, `chunks_sha256`, `scorer.chunking`, `reactions`가 일치해야 합니다. 전체 `scorer`의 모델·접두어는 두 모델에서 다른 것이 정상입니다. 4·5번에는 같은 BioLORD 점수 파일을 사용합니다. 기존 본문 prefix 점수와 calibration은 새 조각 표현으로 다시 생성해야 합니다.
 
-An article is pruned only when its **maximum** reaction similarity is **strictly
-below** the threshold. Ties are retained. Retained articles evaluate all candidate
-labels in descending score order, stopping at the first accepted LLM pair.
-Invalid scores retain the article with its original label order.
+Calibration은 validation의 정답 라벨과 proxy 점수만 사용하므로 4번 LLM 실행을 먼저 할 필요가 없습니다. `conservative`는 validation 정답 양성을 모두, `retain_95`는 최소 95%를 유지하는 경계를 선택합니다. 적은 양성 수나 동점 때문에 두 값이 같아질 수 있으며 test 보존율을 보장하지는 않습니다. `--threshold NUMBER`로 미리 정한 값을 전달할 수도 있습니다. Threshold와 같은 점수·무효 점수·빈 abstract는 생략하지 않으며 proxy가 무효이면 원래 라벨 순서로 LLM 평가합니다.
 
-Calibration uses existing validation reaction annotations. `conservative` retains
-all validation positives. `retain_95` allows at most the integer number of misses
-consistent with 95% validation-positive retention. With few positives the two
-thresholds may coincide. Neither setting guarantees recall on new articles.
-`--threshold NUMBER` can also supply a preselected cutoff for run or replay.
+출력은 `manifest.json`, `progress.jsonl`, `articles.json`, `summary.json`입니다. 생략된 논문도 전체 결과에 남기며 정답 양성이면 F1의 FN에 포함합니다. Article-level precision·recall·F1, gate의 양성 보존율, 생략한 양성 수, 논리적 pair 호출 수, 첫 LLM 수락 순위를 저장합니다. 첫 정답 라벨 순위는 논문별로 별도 기록합니다. `n_positive_pruned`는 4번 대비 추가 누락과 다릅니다. 실제 HTTP 재시도 수나 미완료 논문의 호출은 완료 기록의 합계에 포함되지 않습니다.
 
-Results include every original article, including zero-call pruned negatives and
-pruned positives counted as false negatives. `summary.json` reports article-level
-precision, recall, F1, positive retention, pruned-positive count, LLM calls, and
-mean first accepted LLM witness rank. `articles.json` also records the first gold
-witness rank, which can differ from the first LLM-accepted witness.
+Replay는 같은 점수 파일을 사용한 완료 실행의 진행 기록·결과·요약을 검증합니다. 이전에 생략한 논문을 살리려는데 원본 판정이 없으면 중단합니다. Replay의 호출 수·F1은 정책 비교에 쓰되 실제 실행시간으로 해석하지 않습니다. `estimated_embedding_plus_run_time_s`는 일부 임베딩 준비·점수 구간과 run 구간을 더한 추정치이며 재개하면 전체 추정치를 제공하지 않습니다. 전체 명령 wall time은 가이드의 `/usr/bin/time` 예시로 측정합니다.
 
-Reusing a run directory requires an identical configuration. Replay requires a
-completed run with the same score file and enough evaluated articles for the new
-threshold. In particular, it can evaluate a more aggressive threshold from the
-conservative run. It refuses to invent results for previously pruned articles.
-Replay labels calls as replayed logical pair evaluations and records its source
-manifest, including the threshold's manual/calibration origin. It checks the
-source threshold, completed progress, article results, and summary before reuse.
-Live results count logical pair evaluations, following the team baseline;
-provider retries are outside that counter. `estimated_embedding_plus_run_time_s`
-sums model initialization/embedding/scoring time and the current run through result
-assembly. Dataset loading in the score command and output serialization are outside
-that estimate. Resumed runs mark this estimate unavailable; reissuing a completed
-run preserves its original summary. Measure command wall time separately on the
-server when comparing end-to-end runtime. Each run directory permits one writer,
-and a final incomplete checkpoint record is recovered after an interrupted job.
-
-The shared pairwise predicate and parser follow the team's existing baseline.
-For comparison with experiment 4, share the score file and document preprocessing
-and compare the same model, prompt, label panel, input articles, and concurrency.
+같은 출력 폴더는 설정이 완전히 같은 재개에만 사용하며 한 프로세스만 기록합니다. 로그·타이머 파일은 출력 폴더 바깥에 저장합니다. 공통 LOTUS pair 판정과 parser는 기존 baseline 동작을 유지합니다.

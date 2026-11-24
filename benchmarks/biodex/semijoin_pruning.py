@@ -1,4 +1,4 @@
-"""BioLORD article-level negative pruning using the existing early-stop executor."""
+"""Abstract-chunk E5/BioLORD ordering and BioLORD pruning with the existing early-stop executor."""
 
 import argparse
 import hashlib
@@ -12,6 +12,9 @@ from pathlib import Path
 import numpy as np
 
 MODEL = "FremyCompany/BioLORD-2023"
+MODELS = {"e5": "intfloat/e5-base-v2", "biolord": MODEL}
+CHUNK_TOKENS = 128
+REPRESENTATION = "abstract_chunk_max"
 
 
 def digest(value) -> str:
@@ -35,7 +38,10 @@ def distinct_output(output: Path, inputs: list[Path]) -> None:
 
 
 def article_digest(articles) -> str:
-    return digest(articles[["_qid", "patient_description", "reactions_list"]].to_dict("records"))
+    columns = ["_qid", "patient_description", "reactions_list"]
+    if "abstract" in articles.columns:
+        columns.append("abstract")
+    return digest(articles[columns].to_dict("records"))
 
 
 def ordering(scores: list[float | None]) -> list[int]:
@@ -51,13 +57,15 @@ def maximum(scores: list[float | None]) -> float | None:
     return max(scores)
 
 
-def keep_article(scores: list[float | None], threshold: float) -> bool:
+def keep_article(scores: list[float | None], threshold: float | None) -> bool:
     score = maximum(scores)
-    return score is None or score >= threshold
+    return threshold is None or score is None or score >= threshold
 
 
 def load_scores(path: Path) -> dict:
     data = read_json(path)
+    if data["scorer"].get("representation") != REPRESENTATION or data["scorer"]["model"] not in MODELS.values():
+        raise ValueError("Regenerate scores with the shared abstract-chunk representation.")
     rows, reactions = data["articles"], data["reactions"]
     if not rows or not reactions or len(reactions) != len(set(reactions)):
         raise ValueError("Scores require articles and distinct reaction labels.")
@@ -71,33 +79,104 @@ def load_scores(path: Path) -> dict:
     return data
 
 
+def fits_chunk(text: str, tokenizers: dict) -> bool:
+    return all(
+        len(
+            tokenizer.encode(
+                ("passage: " if name == "e5" else "") + text.strip(),
+                truncation=False,
+                add_special_tokens=True,
+                verbose=False,
+            )
+        )
+        <= CHUNK_TOKENS
+        for name, tokenizer in tokenizers.items()
+    )
+
+
+def tokenizer_digest(tokenizer) -> str:
+    # Fast tokenizer state includes vocabulary, normalization, and special-token handling.
+    state = json.loads(tokenizer.backend_tokenizer.to_str())
+    for key in ("padding", "truncation"):
+        state.pop(key, None)  # Mutable batching settings do not change our untruncated encoding.
+    return digest(state)
+
+
+def abstract_chunks(text: str, tokenizers: dict) -> list[str]:
+    """Preserve the full abstract, using identical spans that fit both embedding models."""
+    if not text.strip():
+        return []
+    chunks, start = [], 0
+    while start < len(text):
+        low, high, end = start + 1, len(text), start
+        while low <= high:
+            middle = (low + high) // 2
+            if fits_chunk(text[start:middle], tokenizers):
+                end, low = middle, middle + 1
+            else:
+                high = middle - 1
+        if end == start:
+            raise ValueError("Even a single character exceeds the shared embedding token budget.")
+        # Prefer a word boundary, but recheck because token counts need not be monotonic.
+        boundary = text.rfind(" ", start, end) + 1 if end < len(text) else end
+        if boundary > start and text[start:boundary].strip() and fits_chunk(text[start:boundary], tokenizers):
+            end = boundary
+        chunks.append(text[start:end])
+        start = end
+    return chunks
+
+
 def make_scores(args) -> None:
     import semijoin_baseline as baseline
+    from transformers import AutoTokenizer
 
     from lotus.models import SentenceTransformersRM
 
-    articles = baseline.load_articles(args.n_articles, split=args.split)
+    articles = baseline.load_articles(args.n_articles, split=args.split, include_abstract=True)
     reactions = baseline.REACTION_SETS[baseline.REACTION_SET]
     if articles.empty:
         raise ValueError("The requested article set is empty.")
     started = time.perf_counter()
-    rm = SentenceTransformersRM(model=MODEL, device=args.device, normalize_embeddings=True)
-    # Use the model's native input length; record it so ordering and pruning share it.
-    vectors = rm(articles["patient_description"].tolist())
-    labels = rm(reactions)
-    similarities = vectors @ labels.T
-    # A zero vector has no defined cosine similarity, even after normalization.
-    invalid_articles = ~np.isfinite(vectors).all(axis=1) | (np.linalg.norm(vectors, axis=1) == 0)
+    model_name = getattr(args, "model", "biolord")
+    rm = SentenceTransformersRM(model=MODELS[model_name], device=args.device, normalize_embeddings=True)
+    if rm.transformer.max_seq_length < CHUNK_TOKENS:
+        raise ValueError("The embedding model input limit is smaller than the common chunk budget.")
+    tokenizers = {
+        name: rm.transformer.tokenizer if name == model_name else AutoTokenizer.from_pretrained(model)
+        for name, model in MODELS.items()
+    }
+    chunks = [abstract_chunks(text, tokenizers) for text in articles["abstract"]]
+    flat_chunks = [text for group in chunks for text in group]
+    label_texts = [("query: " if model_name == "e5" else "") + label for label in reactions]
+    if any(
+        len(tokenizers[model_name].encode(text, add_special_tokens=True, truncation=False))
+        > rm.transformer.max_seq_length
+        for text in label_texts
+    ):
+        raise ValueError("A reaction label exceeds the embedding model input limit.")
+    labels = rm(label_texts)
     invalid_labels = ~np.isfinite(labels).all(axis=1) | (np.linalg.norm(labels, axis=1) == 0)
-    similarities[invalid_articles, :] = np.nan
-    similarities[:, invalid_labels] = np.nan
+    similarities = np.full((len(articles), len(reactions)), np.nan)
+    if flat_chunks:
+        vectors = rm([("passage: " if model_name == "e5" else "") + text.strip() for text in flat_chunks])
+        chunk_scores = vectors @ labels.T
+        # Missing evidence in any chunk must not become a reason to prune an article.
+        invalid_chunks = ~np.isfinite(vectors).all(axis=1) | (np.linalg.norm(vectors, axis=1) == 0)
+        offset = 0
+        for index, group in enumerate(chunks):
+            stop = offset + len(group)
+            if group and not invalid_chunks[offset:stop].any():
+                similarities[index] = chunk_scores[offset:stop].max(axis=0)
+            offset = stop
+        similarities[:, invalid_labels] = np.nan
     elapsed = time.perf_counter() - started
     rows = []
-    for row, scores in zip(articles.to_dict("records"), similarities):
+    for row, scores, group in zip(articles.to_dict("records"), similarities, chunks):
         rows.append(
             {
                 "_qid": row["_qid"],
                 "scores": [float(score) if np.isfinite(score) else None for score in scores],
+                "n_chunks": len(group),
                 "gold_matches": [index for index, label in enumerate(reactions) if label in row["reactions_list"]],
             }
         )
@@ -105,15 +184,26 @@ def make_scores(args) -> None:
         args.output,
         {
             "scorer": {
-                "model": MODEL,
+                "model": MODELS[model_name],
                 "revision": getattr(rm.transformer[0].auto_model.config, "_commit_hash", None),
                 "max_seq_length": rm.transformer.max_seq_length,
                 "normalize_embeddings": True,
-                "representation": "article_prefix",
-                "truncation_limit": baseline.TRUNCATION_LIMIT,
+                "representation": REPRESENTATION,
+                "chunking": {
+                    "version": 1,
+                    "token_budget": CHUNK_TOKENS,
+                    "overlap": 0,
+                    "tokenizers": {
+                        name: {"model": MODELS[name], "sha256": tokenizer_digest(tokenizer)}
+                        for name, tokenizer in tokenizers.items()
+                    },
+                },
+                "document_prefix": "passage: " if model_name == "e5" else "",
+                "label_prefix": "query: " if model_name == "e5" else "",
             },
             "split": args.split,
             "input_sha256": article_digest(articles),
+            "chunks_sha256": digest(chunks),
             "reactions": reactions,
             "embedding_time_s": elapsed,
             "embedding_device": args.device,
@@ -145,6 +235,8 @@ def calibrate(scores: dict, target: float) -> dict:
 def calibrate_file(args) -> None:
     distinct_output(args.output, [args.scores])
     scores = load_scores(args.scores)
+    if scores["scorer"]["model"] != MODEL:
+        raise ValueError("Experiment 5 calibration requires BioLORD scores.")
     if scores["split"] != "validation":
         raise ValueError("Choose thresholds on validation scores before evaluating test data.")
     save_json(
@@ -158,7 +250,15 @@ def calibrate_file(args) -> None:
     )
 
 
-def threshold_from_args(args, scores: dict) -> tuple[float, dict]:
+def threshold_from_args(args, scores: dict) -> tuple[float | None, dict]:
+    experiment = getattr(args, "experiment", 5)
+    expected_model = MODELS["e5"] if experiment == 3 else MODEL
+    if scores["scorer"]["model"] != expected_model:
+        raise ValueError(f"Experiment {experiment} requires {expected_model} scores.")
+    if experiment in (3, 4):
+        if args.calibration is not None or args.threshold is not None:
+            raise ValueError("Experiments 3 and 4 use ordering only; do not supply a threshold or calibration.")
+        return None, {"kind": "disabled"}
     if args.calibration is None:
         threshold = args.threshold
         source = {"kind": "manual"}
@@ -218,12 +318,12 @@ def validate_records(scores: dict, records: list[dict]) -> dict:
             if matched is None and calls != len(order):
                 raise ValueError(f"Article {qid} stopped without evaluating all candidates.")
             if matched is not None and matched != scores["reactions"][order[calls - 1]]:
-                raise ValueError(f"Article {qid} does not match the recorded BioLORD order.")
+                raise ValueError(f"Article {qid} does not match the recorded proxy order.")
         by_id[qid] = record
     return by_id
 
 
-def apply_gate(scores: dict, records: list[dict], threshold: float) -> list[dict]:
+def apply_gate(scores: dict, records: list[dict], threshold: float | None) -> list[dict]:
     by_id = validate_records(scores, records)
     output = []
     for row in scores["articles"]:
@@ -319,7 +419,7 @@ def run_locked(args) -> None:
     threshold, threshold_source = threshold_from_args(args, scores)
     if scores["split"] != "test":
         raise ValueError("Run the LLM evaluation on test scores.")
-    articles = baseline.load_articles(len(scores["articles"]), split=scores["split"])
+    articles = baseline.load_articles(len(scores["articles"]), split=scores["split"], include_abstract=True)
     if (
         baseline.REACTION_SETS[baseline.REACTION_SET] != scores["reactions"]
         or article_digest(articles) != scores["input_sha256"]
@@ -335,6 +435,7 @@ def run_locked(args) -> None:
         if "api_base" not in model_config
     }
     manifest = {
+        "experiment": getattr(args, "experiment", 5),
         "scores_sha256": digest(scores),
         "threshold": threshold,
         "threshold_source": threshold_source,
@@ -349,7 +450,8 @@ def run_locked(args) -> None:
         ),
     }
     manifest_path = args.output_dir / "manifest.json"
-    if manifest_path.exists():
+    resumed = manifest_path.exists()
+    if resumed:
         if read_json(manifest_path) != manifest:
             raise ValueError("Output directory belongs to a different configuration; choose a new directory.")
     else:
@@ -369,8 +471,10 @@ def run_locked(args) -> None:
             raise ValueError("Completed results exist but their progress is incomplete; restore the progress file.")
         records = apply_gate(scores, previous, threshold)
         summary = read_json(summary_path)
-        if summary.get("threshold") != threshold or any(
-            summary.get(key) != value for key, value in summarize(records).items()
+        if (
+            summary.get("experiment") != manifest["experiment"]
+            or summary.get("threshold") != threshold
+            or any(summary.get(key) != value for key, value in summarize(records).items())
         ):
             raise ValueError("Saved result artifacts disagree with the completed progress.")
         if articles_path.exists() and read_json(articles_path) != records:
@@ -390,11 +494,12 @@ def run_locked(args) -> None:
     summary = summarize(records)
     summary.update(
         {
+            "experiment": manifest["experiment"],
             "threshold": threshold,
             "embedding_time_s": scores["embedding_time_s"],
             "invocation_time_s": elapsed,
-            "resumed": bool(previous),
-            "estimated_embedding_plus_run_time_s": None if previous else scores["embedding_time_s"] + elapsed,
+            "resumed": resumed,
+            "estimated_embedding_plus_run_time_s": None if resumed else scores["embedding_time_s"] + elapsed,
             "lm_calls_kind": "logical_pair_evaluations",
         }
     )
@@ -426,6 +531,7 @@ def replay(args) -> None:
     source_summary = read_json(args.source_dir / "summary.json")
     if (
         read_json(args.source_dir / "articles.json") != source
+        or source_summary.get("experiment") != manifest["experiment"]
         or source_summary.get("threshold") != source_threshold
         or any(source_summary.get(key) != value for key, value in summarize(source).items())
     ):
@@ -435,6 +541,7 @@ def replay(args) -> None:
     summary = summarize(records)
     summary.update(
         {
+            "experiment": 5,
             "threshold": threshold,
             "threshold_source": threshold_source,
             "replay": True,
@@ -449,7 +556,8 @@ def replay(args) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    score = commands.add_parser("score", help="Embed each article and target label once; no LLM calls.")
+    score = commands.add_parser("score", help="Embed abstract chunks and target labels; no LLM calls.")
+    score.add_argument("--model", choices=list(MODELS), default="biolord")
     score.add_argument("--split", choices=["validation", "test"], required=True)
     score.add_argument("--n-articles", type=int)
     score.add_argument("--device", default="cpu")
@@ -462,11 +570,12 @@ def main() -> None:
     for name, action in [("run", run), ("replay", replay)]:
         command = commands.add_parser(name)
         command.add_argument("scores", type=Path)
-        thresholds = command.add_mutually_exclusive_group(required=True)
+        thresholds = command.add_mutually_exclusive_group()
         thresholds.add_argument("--threshold", type=float)
         thresholds.add_argument("--calibration", type=Path)
         command.add_argument("--policy", choices=["conservative", "retain_95"], default="conservative")
         if name == "run":
+            command.add_argument("--experiment", type=int, choices=[3, 4, 5], default=5)
             command.add_argument("--output-dir", type=Path, required=True)
         else:
             command.add_argument("--source-dir", type=Path, required=True)

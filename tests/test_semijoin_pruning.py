@@ -39,11 +39,20 @@ def load_baseline(real_lotus: bool = False):
     return baseline
 
 
+class FakeTokenizer:
+    def __init__(self, characters_per_token=1):
+        self.characters_per_token = characters_per_token
+        self.backend_tokenizer = SimpleNamespace(to_str=lambda: json.dumps({"step": characters_per_token}))
+
+    def encode(self, text, **kwargs):
+        return [0] * (2 + (len(text) + self.characters_per_token - 1) // self.characters_per_token)
+
+
 class TestSemijoinPruning(unittest.TestCase):
     def setUp(self):
         self.scores = {
             "split": "test",
-            "scorer": {"model": pruning.MODEL},
+            "scorer": {"model": pruning.MODEL, "representation": pruning.REPRESENTATION},
             "reactions": ["A", "B"],
             "articles": [
                 {"_qid": 0, "scores": [0.2, 0.8], "gold_matches": [1]},
@@ -131,47 +140,125 @@ class TestSemijoinPruning(unittest.TestCase):
     def test_replay_rejects_missing_or_wrong_order_results(self):
         with self.assertRaisesRegex(ValueError, "no evaluated result"):
             pruning.apply_gate(self.scores, [], 0.5)
-        with self.assertRaisesRegex(ValueError, "BioLORD order"):
+        with self.assertRaisesRegex(ValueError, "proxy order"):
             pruning.apply_gate(self.scores, [{"_qid": 0, "matched": "A", "lm_calls": 1}], 0.5)
         pruned = pruning.apply_gate(self.scores, [], 0.9)
         with self.assertRaisesRegex(ValueError, "no evaluated result"):
             pruning.apply_gate(self.scores, pruned, 0.5)
 
-    def test_score_and_calibration_commands_keep_zero_vectors(self):
+    def test_common_chunks_preserve_full_abstract_and_fit_both_tokenizers(self):
+        tokenizers = {"e5": FakeTokenizer(), "biolord": FakeTokenizer(2)}
+        text = "  Long abstract 한글🙂 " * 30 + "final evidence\n"
+        chunks = pruning.abstract_chunks(text, tokenizers)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(chunks), text)
+        self.assertTrue(all(pruning.fits_chunk(chunk, tokenizers) for chunk in chunks))
+        self.assertIn("final evidence", chunks[-1])
+        self.assertEqual(pruning.abstract_chunks(" \n", tokenizers), [])
+        text = " " + "!," * 150
+        chunks = pruning.abstract_chunks(text, tokenizers)
+        self.assertEqual("".join(chunks), text)
+        self.assertTrue(all(chunk.strip() and pruning.fits_chunk(chunk, tokenizers) for chunk in chunks))
+        original = pruning.tokenizer_digest(tokenizers["e5"])
+        tokenizers["e5"].backend_tokenizer.to_str = lambda: json.dumps(
+            {"step": 1, "padding": "batch", "truncation": 128}
+        )
+        self.assertEqual(pruning.tokenizer_digest(tokenizers["e5"]), original)
+        self.assertNotEqual(pruning.tokenizer_digest(tokenizers["biolord"]), original)
+
+    def test_chunk_scoring_prefixes_max_pool_and_invalid_evidence(self):
         baseline = load_baseline()
         baseline.load_articles = Mock(
             return_value=pd.DataFrame(
                 [
-                    {"_qid": 0, "patient_description": "first", "reactions_list": ["A"]},
-                    {"_qid": 1, "patient_description": "second", "reactions_list": []},
+                    {
+                        "_qid": 0,
+                        "patient_description": "LLM only",
+                        "abstract": "head " * 80 + "TAIL",
+                        "reactions_list": [],
+                    },
+                    {"_qid": 1, "patient_description": "second", "abstract": "bad", "reactions_list": ["A"]},
+                    {"_qid": 2, "patient_description": "third", "abstract": "", "reactions_list": []},
                 ]
             )
         )
         baseline.REACTION_SET, baseline.REACTION_SETS = "test", {"test": ["A", "B"]}
-        rm = Mock(side_effect=[np.array([[0.0, 0.0], [1.0, 0.0]]), np.array([[1.0, 0.0], [0.0, 0.0]])])
-        rm.transformer = Mock(max_seq_length=128)
-        rm.transformer.__getitem__ = Mock(
-            return_value=SimpleNamespace(auto_model=SimpleNamespace(config=SimpleNamespace()))
+        for model in ["e5", "biolord"]:
+            label_texts = [("query: " if model == "e5" else "") + label for label in ["A", "B"]]
+
+            def embed(texts):
+                if texts == label_texts:
+                    return np.eye(2)
+                if model == "e5":
+                    self.assertTrue(all(text.startswith("passage: ") for text in texts))
+                self.assertFalse(any("LLM only" in text for text in texts))
+                return np.array(
+                    [[0.0, 0.0] if "bad" in text else [0.0, 1.0] if "TAIL" in text else [1.0, 0.0] for text in texts]
+                )
+
+            rm = Mock(side_effect=embed)
+            rm.transformer = Mock(max_seq_length=128, tokenizer=FakeTokenizer(1 if model == "e5" else 2))
+            rm.transformer.__getitem__ = Mock(
+                return_value=SimpleNamespace(auto_model=SimpleNamespace(config=SimpleNamespace()))
+            )
+            with self.subTest(model=model), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with patch.dict(
+                    sys.modules,
+                    {
+                        "semijoin_baseline": baseline,
+                        "lotus.models": SimpleNamespace(SentenceTransformersRM=Mock(return_value=rm)),
+                        "transformers": SimpleNamespace(
+                            AutoTokenizer=SimpleNamespace(
+                                from_pretrained=Mock(return_value=FakeTokenizer(2 if model == "e5" else 1))
+                            )
+                        ),
+                    },
+                ):
+                    pruning.make_scores(
+                        SimpleNamespace(
+                            model=model, n_articles=None, split="validation", device="cpu", output=root / "scores.json"
+                        )
+                    )
+                scores = pruning.load_scores(root / "scores.json")
+                self.assertEqual(rm.call_count, 2)
+                self.assertEqual(rm.call_args_list[0].args[0], label_texts)
+                self.assertEqual(scores["articles"][0]["scores"], [1.0, 1.0])
+                self.assertGreater(scores["articles"][0]["n_chunks"], 1)
+                for row in scores["articles"][1:]:
+                    self.assertEqual(row["scores"], [None, None])
+                    self.assertTrue(pruning.keep_article(row["scores"], 0.5))
+                # The only gold positive has an invalid embedding: do not invent a cutoff.
+                with self.assertRaisesRegex(ValueError, "finite scores"):
+                    pruning.calibrate(scores, 1.0)
+
+    def test_experiment_model_and_gate_selection_and_abstract_identity(self):
+        no_gate = SimpleNamespace(experiment=4, threshold=None, calibration=None)
+        self.assertEqual(pruning.threshold_from_args(no_gate, self.scores), (None, {"kind": "disabled"}))
+        self.assertTrue(pruning.keep_article([0.1, 0.3], None))
+        no_gate.threshold = 0.5
+        with self.assertRaisesRegex(ValueError, "ordering only"):
+            pruning.threshold_from_args(no_gate, self.scores)
+        no_gate.experiment, no_gate.threshold = 3, None
+        with self.assertRaisesRegex(ValueError, "Experiment 3 requires"):
+            pruning.threshold_from_args(no_gate, self.scores)
+        self.scores["scorer"]["model"] = pruning.MODELS["e5"]
+        self.assertIsNone(pruning.threshold_from_args(no_gate, self.scores)[0])
+        no_gate.experiment = 5
+        with self.assertRaisesRegex(ValueError, "Experiment 5 requires"):
+            pruning.threshold_from_args(no_gate, self.scores)
+        articles = pd.DataFrame(
+            [{"_qid": 0, "patient_description": "fixed LLM text", "reactions_list": [], "abstract": "old"}]
         )
+        old_digest = pruning.article_digest(articles)
+        articles.loc[0, "abstract"] = "new"
+        self.assertNotEqual(pruning.article_digest(articles), old_digest)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with patch.dict(
-                sys.modules,
-                {
-                    "semijoin_baseline": baseline,
-                    "lotus.models": SimpleNamespace(SentenceTransformersRM=Mock(return_value=rm)),
-                },
-            ):
-                pruning.make_scores(
-                    SimpleNamespace(n_articles=None, split="validation", device="cpu", output=root / "scores.json")
-                )
-            scores = pruning.load_scores(root / "scores.json")
-            self.assertEqual(rm.call_count, 2)
-            self.assertEqual(scores["articles"][0]["scores"], [None, None])
-            self.assertTrue(pruning.keep_article(scores["articles"][1]["scores"], 0.5))
-            # All positive scores were invalid, so a cutoff cannot be calibrated.
-            with self.assertRaisesRegex(ValueError, "finite scores"):
-                pruning.calibrate_file(SimpleNamespace(scores=root / "scores.json", output=root / "calibration.json"))
+            self.scores["scorer"]["representation"] = "article_prefix"
+            pruning.save_json(root / "old.json", self.scores)
+            with self.assertRaisesRegex(ValueError, "Regenerate scores"):
+                pruning.load_scores(root / "old.json")
 
     def test_run_lock_and_interrupted_progress(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -205,6 +292,84 @@ class TestSemijoinPruning(unittest.TestCase):
         self.assertEqual(seen, [(7, 1)])
         self.assertEqual(calls, 1)
         self.assertEqual(joined.to_dict("records"), [{"_qid": 7, "reaction": "B"}])
+
+    def test_loader_keeps_llm_prefix_and_exposes_complete_abstract_only_when_requested(self):
+        baseline = load_baseline()
+        raw = pd.DataFrame(
+            {
+                "title": ["paper"],
+                "fulltext_processed": ["x" * 9000],
+                "abstract": ["abstract tail"],
+                "reactions": ["A, B"],
+            }
+        )
+        baseline.load_dataset = Mock(return_value=SimpleNamespace(to_pandas=lambda: raw.copy()))
+        self.assertNotIn("abstract", baseline.load_articles(1).columns)
+        articles = baseline.load_articles(1, include_abstract=True)
+        self.assertEqual(articles.loc[0, "abstract"], "abstract tail")
+        self.assertEqual(articles.loc[0, "patient_description"], "x" * 8000)
+
+    def test_ordering_runs_3_and_4_and_replay_5_share_the_existing_executor(self):
+        baseline = load_baseline()
+        articles = pd.DataFrame(
+            [
+                {"_qid": 0, "patient_description": "first", "abstract": "first abstract", "reactions_list": ["B"]},
+                {"_qid": 1, "patient_description": "second", "abstract": "second abstract", "reactions_list": ["A"]},
+            ]
+        )
+        self.scores["input_sha256"] = pruning.article_digest(articles)
+        baseline.load_articles = Mock(return_value=articles)
+        baseline.REACTION_SET, baseline.REACTION_SETS = "test", {"test": ["A", "B"]}
+        baseline.configure = Mock(return_value=object())
+        baseline.pairwise_join = lambda *args, **kwargs: SimpleNamespace(join_results=[(args[2][0], args[3][0], None)])
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            for experiment, model in [(3, pruning.MODELS["e5"]), (4, pruning.MODEL)]:
+                self.scores["scorer"]["model"] = model
+                path = root / f"scores{experiment}.json"
+                pruning.save_json(path, self.scores)
+                with patch.dict(sys.modules, {"semijoin_baseline": baseline}):
+                    pruning.run(
+                        SimpleNamespace(
+                            scores=path,
+                            experiment=experiment,
+                            threshold=None,
+                            calibration=None,
+                            output_dir=root / f"run{experiment}",
+                        )
+                    )
+                summary = pruning.read_json(root / f"run{experiment}" / "summary.json")
+                self.assertEqual((summary["lm_calls"], summary["n_pruned"]), (2, 0))
+                self.assertIsNone(summary["threshold"])
+            # A prior attempt can have made partial pair calls without completing any article.
+            retry_dir = root / "retry4"
+            pruning.save_json(retry_dir / "manifest.json", pruning.read_json(root / "run4" / "manifest.json"))
+            with patch.dict(sys.modules, {"semijoin_baseline": baseline}):
+                pruning.run(
+                    SimpleNamespace(
+                        scores=root / "scores4.json",
+                        experiment=4,
+                        threshold=None,
+                        calibration=None,
+                        output_dir=retry_dir,
+                    )
+                )
+            retry_summary = pruning.read_json(retry_dir / "summary.json")
+            self.assertTrue(retry_summary["resumed"])
+            self.assertIsNone(retry_summary["estimated_embedding_plus_run_time_s"])
+            pruning.replay(
+                SimpleNamespace(
+                    scores=root / "scores4.json",
+                    threshold=0.5,
+                    calibration=None,
+                    source_dir=root / "run4",
+                    output=root / "replay5.json",
+                )
+            )
+            replay = pruning.read_json(root / "replay5.json")
+            self.assertEqual(replay["summary"]["experiment"], 5)
+            self.assertEqual((replay["summary"]["lm_calls"], replay["summary"]["n_positive_pruned"]), (1, 1))
+            baseline.configure.assert_called_with(with_retriever=False)
 
     @unittest.skipUnless(importlib.util.find_spec("litellm"), "Real LOTUS dependencies are installed in CI.")
     def test_real_lotus_pair_formatting_parsing_and_early_stop(self):
@@ -294,7 +459,7 @@ class TestSemijoinPruning(unittest.TestCase):
                 (args.output_dir / "progress.jsonl").write_text(
                     json.dumps({"_qid": 0, "matched": "A", "lm_calls": 1}) + "\n", encoding="utf-8"
                 )
-                with self.assertRaisesRegex(ValueError, "BioLORD order"):
+                with self.assertRaisesRegex(ValueError, "proxy order"):
                     pruning.run(args)
                 baseline.configure.assert_not_called()
                 (args.output_dir / "progress.jsonl").write_text(
