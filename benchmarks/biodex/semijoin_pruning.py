@@ -79,6 +79,81 @@ def load_scores(path: Path) -> dict:
     return data
 
 
+def compare_baselines(scores: dict, paths: list[Path], baseline) -> dict:
+    """Compare recorded settings, without treating missing historical provenance as verified."""
+    expected = {
+        "reaction_set": baseline.REACTION_SET,
+        "prompt": baseline.PROMPT,
+        "reactions": scores["reactions"],
+        "n_articles": len(scores["articles"]),
+        "n_reactions": len(scores["reactions"]),
+        "n_gold": sum(bool(row["gold_matches"]) for row in scores["articles"]),
+        "model": baseline.lm_config()["model"],
+    }
+    methods, sources = set(), {}
+    for path in paths:
+        summary = read_json(path)
+        runs = summary.get("runs") if isinstance(summary, dict) else None
+        if not isinstance(runs, dict) or not {"join_full", "early_stop"}.intersection(runs):
+            raise ValueError(f"{path}: no join_full or early_stop result; cascade is not experiment 2.")
+        checked, missing = [], []
+
+        def check(values, key, target, prefix=""):
+            field = prefix + key
+            if key not in values:
+                missing.append(field)
+            elif type(values[key]) is not type(target) or values[key] != target:
+                raise ValueError(f"{path}: {field} differs: recorded {values[key]!r}, current {target!r}.")
+            else:
+                checked.append(field)
+
+        for key in ("reaction_set", "prompt", "reactions"):
+            check(summary, key, expected[key])
+        found = sorted({"join_full", "early_stop"}.intersection(runs))
+        for method in found:
+            values = runs[method]
+            if not isinstance(values, dict) or type(values.get("n_articles")) is not int or values["n_articles"] <= 0:
+                raise ValueError(f"{path}: {method} must record a positive integer n_articles.")
+            check(values, "method", method, f"runs.{method}.")
+            for key in ("n_articles", "n_reactions", "n_gold", "model"):
+                check(values, key, expected[key], f"runs.{method}.")
+        methods.update(found)
+        sources[digest(summary)] = {
+            "summary_sha256": digest(summary),
+            "methods": found,
+            "checked_fields": checked,
+            "missing_fields": missing,
+            "ignored_methods": sorted(set(runs) - set(found)),
+        }
+    return {
+        "status": "reported_fields_match_only",
+        "current": expected,
+        "sources": [sources[key] for key in sorted(sources)],
+        "missing_methods": sorted({"join_full", "early_stop"} - methods),
+        "unverified": [
+            "historical_article_ids_and_exact_input_text",
+            "historical_dataset_revision",
+            "historical_prompt_text_and_parser_settings",
+            "historical_model_weights_and_server_configuration",
+            "historical_timing_scope_and_cache_state",
+        ],
+    }
+
+
+def check_baselines(args) -> None:
+    import semijoin_baseline as baseline
+
+    distinct_output(args.output, [args.scores, *args.baseline_summary])
+    if args.output.exists():
+        raise ValueError("Comparison output already exists; choose a new path.")
+    scores = load_scores(args.scores)
+    if scores["split"] != "test" or scores["reactions"] != baseline.REACTION_SETS[baseline.REACTION_SET]:
+        raise ValueError("Compare baselines against test scores for the current reaction panel.")
+    report = compare_baselines(scores, args.baseline_summary, baseline)
+    save_json(args.output, report)
+    print(json.dumps(report, indent=2))
+
+
 def fits_chunk(text: str, tokenizers: dict) -> bool:
     return all(
         len(
@@ -452,6 +527,8 @@ def run_locked(args) -> None:
             {"explicit": model_config.get("api_base"), "provider_environment": provider_endpoints}
         ),
     }
+    if getattr(args, "baseline_summary", None):
+        manifest["baseline_comparison"] = compare_baselines(scores, args.baseline_summary, baseline)
     manifest_path = args.output_dir / "manifest.json"
     resumed = manifest_path.exists()
     if resumed:
@@ -573,6 +650,11 @@ def main() -> None:
     calibration.add_argument("scores", type=Path)
     calibration.add_argument("--output", type=Path, required=True)
     calibration.set_defaults(action=calibrate_file)
+    comparison = commands.add_parser("check-baselines", help="Compare recorded experiment 1/2 settings; no LLM calls.")
+    comparison.add_argument("scores", type=Path)
+    comparison.add_argument("--baseline-summary", type=Path, action="append", required=True)
+    comparison.add_argument("--output", type=Path, required=True)
+    comparison.set_defaults(action=check_baselines)
     for name, action in [("run", run), ("replay", replay)]:
         command = commands.add_parser(name)
         command.add_argument("scores", type=Path)
@@ -582,6 +664,7 @@ def main() -> None:
         command.add_argument("--policy", choices=["conservative", "retain_95"], default="conservative")
         if name == "run":
             command.add_argument("--experiment", type=int, choices=[3, 4, 5], default=5)
+            command.add_argument("--baseline-summary", type=Path, action="append")
             command.add_argument("--output-dir", type=Path, required=True)
         else:
             command.add_argument("--source-dir", type=Path, required=True)

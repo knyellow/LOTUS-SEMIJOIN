@@ -36,10 +36,12 @@ You can find example results I ran earlier in biodex_results/Mar-17-25, which ga
 
 전체 사전 설정·로컬 서버 명령·복사 가능한 실험별 명령은 [한국어 코드 설명과 실행 가이드](NEGATIVE_PRUNING_GUIDE.ko.md)에 정리했습니다. **기존 실험 서버 세팅 재사용 → 11.0 공통 준비 → 11.1 실험 3 → 11.2 실험 4 → 11.3 실험 5** 순서입니다. LLM의 새 다운로드나 새 서버 구성을 기본 단계로 요구하지 않습니다. E5·BioLORD proxy 가중치는 score 단계에서 별도로 준비됩니다.
 
+**서버에서 먼저 할 일**은 과거 250편의 `join_full`·`early_stop` 요약을 찾아 3번 LLM 실행 전에 `check-baselines`로 대조하는 것입니다. 팀 회의록에는 test 앞 250편, 본문 8,000자, 간 패널 정답 양성 10편이 기록돼 있습니다. 2,115회·F1 0.122는 cascade 결과입니다. 2번 고정 순서 조기 종료의 원본은 서버에서 확인해야 합니다. 요약을 확보하지 못하면 새 비교군을 측정하거나 3~5번 자체 비교로 범위를 표시합니다.
+
 | 순서 | 실행 전 준비 | 실행 | 확인할 결과 |
 |---|---|---|---|
-| 공통 | 기존 1·2번 Python 환경·LLM 서비스·설정 재사용 | 이미 준비된 endpoint와 원래 운영/캐시 절차 재사용 | 연결 확인·기존 설정 기록, 확인 가능한 파일 SHA 등 보존 |
-| 3 | 같은 test 논문의 E5 점수, 서버 연결 점검 | `run ... --experiment 3` | 3번 summary·articles·progress |
+| 공통 | 기존 Python 환경·LLM 서비스·두 원본 요약 확인 | 기존 endpoint·운영/캐시 절차 재사용 | 요약 파일과 확인 가능한 설정 보존 |
+| 3 | E5 test 점수 생성, 1·2번 요약 대조, 서버 연결 점검 | `run ... --experiment 3` | 대조 보고서와 3번 summary·articles·progress |
 | 4 | BioLORD test·validation 점수, threshold 고정, 두 모델의 입력·chunk 일치 검사 | `run ... --experiment 4` | 4번 완료 결과와 보존된 BioLORD 점수 |
 | 5 | 같은 BioLORD 점수·validation threshold·4번 완료 결과 | 두 정책 replay → `run ... --experiment 5 --calibration ... --policy conservative` | 두 정책 호출 수·품질, 보수적 조건 실제 시간 |
 
@@ -54,5 +56,7 @@ Proxy는 abstract 전체를 두 tokenizer에서 모두 128토큰 이내인 동�
 응답 cache는 기본적으로 꺼져 있지만 서버 KV cache는 별개이므로 live run마다 같은 기존 운영/캐시 절차와 사전 점검을 적용합니다. 초기 KV 상태를 통제하지 못하면 그 사실을 기록하고 cold-start 속도 비교로 해석하지 않습니다. `EARLY_WORKERS`는 논문 병렬도, `LLM_BATCH`는 LM 호출 내부 상한, 서버 `--parallel`은 슬롯 수입니다. 본문 8,000자와 프롬프트·출력을 수용할 실제 슬롯당 context를 시작 로그에서 확인합니다.
 
 결과는 `manifest.json`, `progress.jsonl`, `articles.json`, `summary.json`에 남깁니다. `LLM_SERVER_ID`와 manifest 해시는 실행 설정·결과 혼용을 검출하지만 실제 서버 파일을 자동 확인하지는 않습니다. 생략 논문도 F1의 전체 분모에 남기며, 논리적 pair 호출·F1/recall·gold/LLM witness 순위·양성 생략을 기록합니다. `n_positive_pruned`와 4번 대비 추가 FN은 다릅니다.
+
+`check-baselines`는 기록된 논문·라벨·정답 양성 수, 라벨 순서, 패널·프롬프트·모델 이름을 대조하고 누락 항목을 표시합니다. 3·4·5번과 재개 명령에도 같은 요약을 전달합니다. 과거 PMID·정확한 입력·모델 가중치·타이머 구간은 요약만으로 입증할 수 없습니다. 1~5번의 속도비를 내려면 같은 구간에서 측정한 과거 외부 wall time을 확보하거나 1·2번을 같은 조건에서 재측정해야 합니다.
 
 Replay는 호출 수·품질을 재계산하며 실제 실행시간을 재현하지 않습니다. 시간 비교는 test 점수 생성과 무중단 live run의 외부 wall time을 사용하고 validation 준비 비용을 별도로 표시합니다. 재개·완료 재호출의 짧은 시간으로 원래 timer를 덮어쓰거나 전체 시간이라고 보고하지 않습니다. 코드 호출 경로와 저장 지표의 세부 의미는 가이드 2~10절, 결과 확인 코드는 12절을 참고합니다.

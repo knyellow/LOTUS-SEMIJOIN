@@ -61,6 +61,130 @@ class TestSemijoinPruning(unittest.TestCase):
             "embedding_time_s": 1.0,
         }
 
+    def baseline_summary(self, baseline):
+        return {
+            "reaction_set": baseline.REACTION_SET,
+            "prompt": baseline.PROMPT,
+            "reactions": self.scores["reactions"],
+            "runs": {
+                method: {
+                    "method": method,
+                    "n_articles": 2,
+                    "n_reactions": 2,
+                    "n_gold": 2,
+                    "model": baseline.lm_config()["model"],
+                }
+                for method in ("join_full", "early_stop")
+            },
+        }
+
+    def test_baseline_comparison_rejects_different_recorded_conditions(self):
+        baseline = load_baseline()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            for key, value in [
+                ("reaction_set", "other"), ("prompt", "other"), ("reactions", ["B", "A"]),
+                ("n_articles", 25), ("n_reactions", 3), ("n_gold", 1), ("model", "other"),
+                ("method", "join_cascade"),
+            ]:
+                with self.subTest(field=key):
+                    summary = self.baseline_summary(baseline)
+                    target = summary if key in ("reaction_set", "prompt", "reactions") else summary["runs"]["early_stop"]
+                    target[key] = value
+                    pruning.save_json(path, summary)
+                    with self.assertRaisesRegex(ValueError, f"{key} differs"):
+                        pruning.compare_baselines(self.scores, [path], baseline)
+
+    def test_missing_baseline_fields_are_unknown_and_cascade_is_not_early(self):
+        baseline = load_baseline()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            summary = self.baseline_summary(baseline)
+            summary.pop("prompt")
+            summary["runs"]["join_full"].pop("model")
+            summary["runs"]["join_cascade"] = summary["runs"].pop("early_stop")
+            pruning.save_json(path, summary)
+            report = pruning.compare_baselines(self.scores, [path], baseline)
+            self.assertEqual(report["status"], "reported_fields_match_only")
+            self.assertEqual(report["missing_methods"], ["early_stop"])
+            self.assertEqual(report["sources"][0]["missing_fields"], ["prompt", "runs.join_full.model"])
+            self.assertEqual(report["sources"][0]["ignored_methods"], ["join_cascade"])
+            self.assertIn("historical_article_ids_and_exact_input_text", report["unverified"])
+            del summary["runs"]["join_full"]
+            pruning.save_json(path, summary)
+            with self.assertRaisesRegex(ValueError, "cascade is not experiment 2"):
+                pruning.compare_baselines(self.scores, [path], baseline)
+            for placeholder in [{}, {"method": "early_stop"}, {"n_articles": True}, {"n_articles": 2.0}]:
+                with self.subTest(placeholder=placeholder):
+                    summary["runs"] = {"early_stop": placeholder}
+                    pruning.save_json(path, summary)
+                    with self.assertRaisesRegex(ValueError, "positive integer n_articles"):
+                        pruning.compare_baselines(self.scores, [path], baseline)
+
+    def test_check_baselines_needs_no_model_and_is_stable_across_file_moves(self):
+        baseline = load_baseline()
+        baseline.REACTION_SET, baseline.REACTION_SETS = "test", {"test": ["A", "B"]}
+        baseline.configure, baseline.load_articles = Mock(), Mock()
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            paths = [root / "full.json", root / "early.json"]
+            for path, method in zip(paths, ("join_full", "early_stop")):
+                summary = self.baseline_summary(baseline)
+                summary["runs"] = {method: summary["runs"][method]}
+                pruning.save_json(path, summary)
+            pruning.save_json(root / "scores.json", self.scores)
+            args = SimpleNamespace(scores=root / "scores.json", baseline_summary=paths, output=root / "check.json")
+            with patch.dict(sys.modules, {"semijoin_baseline": baseline}):
+                pruning.check_baselines(args)
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    pruning.check_baselines(args)
+            report = pruning.read_json(args.output)
+            self.assertEqual(report["missing_methods"], [])
+            moved = root / "moved.json"
+            paths[0].replace(moved)
+            self.assertEqual(report, pruning.compare_baselines(self.scores, [paths[1], moved], baseline))
+            baseline.configure.assert_not_called()
+            baseline.load_articles.assert_not_called()
+
+    def test_run_checks_baselines_before_llm_and_binds_reference_contents(self):
+        baseline = load_baseline()
+        articles = pd.DataFrame([
+            {"_qid": 0, "patient_description": "first", "reactions_list": ["B"]},
+            {"_qid": 1, "patient_description": "second", "reactions_list": ["A"]},
+        ])
+        baseline.REACTION_SET, baseline.REACTION_SETS = "test", {"test": ["A", "B"]}
+        baseline.load_articles = Mock(return_value=articles)
+        baseline.configure = Mock(return_value=object())
+        baseline.pairwise_join = Mock(return_value=SimpleNamespace(join_results=[]))
+        self.scores["input_sha256"] = pruning.article_digest(articles)
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            pruning.save_json(root / "scores.json", self.scores)
+            summary = self.baseline_summary(baseline)
+            summary["runs"]["join_full"]["n_articles"] = 25
+            pruning.save_json(root / "baseline.json", summary)
+            args = SimpleNamespace(
+                scores=root / "scores.json", experiment=4, threshold=None, calibration=None,
+                baseline_summary=[root / "baseline.json"], output_dir=root / "run",
+            )
+            with patch.dict(sys.modules, {"semijoin_baseline": baseline}):
+                with self.assertRaisesRegex(ValueError, "n_articles differs"):
+                    pruning.run(args)
+                baseline.configure.assert_not_called()
+                baseline.pairwise_join.assert_not_called()
+                self.assertFalse((args.output_dir / "manifest.json").exists())
+                summary["runs"]["join_full"]["n_articles"] = 2
+                pruning.save_json(root / "baseline.json", summary)
+                pruning.run(args)
+                manifest = pruning.read_json(args.output_dir / "manifest.json")
+                self.assertEqual(manifest["baseline_comparison"]["missing_methods"], [])
+                baseline.configure.reset_mock()
+                summary["runs"]["join_full"]["time_s"] = 123
+                pruning.save_json(root / "baseline.json", summary)
+                with self.assertRaisesRegex(ValueError, "different configuration"):
+                    pruning.run(args)
+                baseline.configure.assert_not_called()
+
     def test_strict_threshold_and_invalid_scores_retain_article(self):
         self.assertTrue(pruning.keep_article([0.5, 0.1], 0.5))
         self.assertFalse(pruning.keep_article([0.49, 0.1], 0.5))
