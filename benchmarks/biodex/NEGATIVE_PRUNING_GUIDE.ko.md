@@ -268,7 +268,9 @@ run_early_stop
 
 Linux Bash 기준이다. **실제 LLM 평가 순서는 3번 run → 4번 run → 5번 run**이다. 점수 생성·validation 보정·replay는 LLM을 호출하지 않는다. 각 단계가 성공하고 저장 파일을 확인한 뒤 다음 단계로 진행한다.
 
-### 11.0 공통 준비
+### 11.0 공통 준비: 기존 실험 서버의 세팅 재사용
+
+**기본 절차는 1·2번을 실행한 서버에 이미 준비된 Python 환경·LLM 서비스·가중치·운영 설정을 그대로 이용하는 것이다.** 사용자가 지금 GGUF 파일명이나 시작 명령을 별도로 알아내야 진행할 수 있는 절차가 아니다. LLM 가중치의 새 다운로드·새 서버 설치·임의의 context/양자화/GPU 설정으로 재구성하는 작업은 필요하지 않다. E5·BioLORD proxy 모델은 별개이며 score 단계에서 캐시가 없으면 다운로드한다. 서버에 접속한 뒤 기존 환경을 활성화하고, 확인 가능한 설정을 기록한 후 3→4→5를 실행한다.
 
 | 설정 | 확인할 내용 |
 |---|---|
@@ -279,25 +281,22 @@ Linux Bash 기준이다. **실제 LLM 평가 순서는 3번 run → 4번 run →
 | Proxy 장치 | EMBED_DEVICE=cpu 또는 cuda. LLM 추론 장치와 별개 |
 | 저장 경로 | 이번 비교 전체의 새 R. experiment3/4/5 폴더는 실행기가 생성 |
 
-기본 경로는 `hosted_vllm/llama3.1-8b` → `http://localhost:8080/v1`이다. `hosted_vllm/`은 LiteLLM의 OpenAI 호환 서버 연결 이름이며 실제 서버가 반드시 vLLM이어야 한다는 뜻은 아니다. **코드는 LLM을 자동 다운로드하거나 서버를 시작하지 않는다.** 로컬 `llama-server`에 가중치를 올려 둬야 하며 외부 유료 OpenAI 모델로 자동 전환하지 않는다.
+기본 경로는 `hosted_vllm/llama3.1-8b` → `http://localhost:8080/v1`이다. `hosted_vllm/`은 LiteLLM의 OpenAI 호환 서버 연결 이름이며 실제 서버가 반드시 vLLM이어야 한다는 뜻은 아니다. **이미 준비된 LLM 서비스에 연결한다.** 코드는 LLM을 새로 다운로드하거나 서버를 시작하지 않으며 외부 유료 OpenAI 모델로 자동 전환하지 않는다.
 
-인접 `biodex_local.py`에는 llama.cpp·Q4_K_M이 명시돼 있고 초기 N=25 커밋에는 Llama-3.1-8B Q4가 적혀 있다. 다만 **완료된 N=250 실험 1·2번의 실제 GGUF·양자화·서버 명령은 이 기록만으로 확정할 수 없다.** 아래 alias는 코드 기본값 예시다. 기존 실행이 다른 모델이면 파일과 alias를 맞춘다. Alias 일치는 가중치 동일성의 증명이 아니다.
+인접 `biodex_local.py`에는 llama.cpp·Q4_K_M이 명시돼 있고 초기 N=25 커밋에는 Llama-3.1-8B Q4가 적혀 있다. 다만 **완료된 N=250 실험 1·2번의 실제 GGUF·양자화·서버 명령은 이 기록만으로 확정할 수 없다.** 아래 alias는 코드 기본값 예시다. 기존 서버에 설정된 endpoint·alias·가중치를 우선하며 새 모델로 대체하지 않는다. 파일명·양자화·시작 명령은 서버의 기존 로그·설정에서 확인되는 범위만 기록하고 미확인 항목은 그대로 표시한다. Alias 일치는 가중치 동일성의 증명이 아니다.
 
 #### A. Python 환경과 코드
 
-기존 1·2번 환경을 활성화한 뒤 저장소 루트에서 시작한다. 새 환경이 필요한 경우에만 첫 두 줄을 실행한다.
+서버에서 기존 1·2번용 Conda/venv 또는 팀의 환경 설정 스크립트를 먼저 활성화한 뒤 저장소 루트에서 시작한다. 기존 패키지 버전을 유지하기 위해 현재 checkout만 editable로 연결한다.
 
 ```bash
-python3.10 -m venv .venv
-source .venv/bin/activate
-
 set -euo pipefail
 git fetch origin
 git switch feat/biolord-negative-pruning
 git pull --ff-only
-python -m pip install -e . datasets
+python -m pip install --no-deps -e .
 python - <<'PY'
-import sys, torch, lotus
+import sys, torch, lotus, datasets
 print('python:', sys.version, 'lotus:', lotus.__file__)
 print('torch:', torch.__version__, 'CUDA:', torch.cuda.is_available())
 assert (3, 10) <= sys.version_info[:2] < (3, 13)
@@ -305,51 +304,58 @@ PY
 cd benchmarks/biodex
 ```
 
-`cuda` 임베딩은 CUDA 지원 PyTorch와 여유 VRAM이 있을 때만 사용한다. LLM이 GPU에서 실행돼도 proxy는 CPU로 계산할 수 있다. 같은 GPU의 VRAM이 부족하면 **점수 생성 중 서버를 멈추고 run 직전에 재시작**한다. 모델 다운로드를 포함한 cold 비용과 캐시가 준비된 비용도 구분한다.
+`cuda` 임베딩은 CUDA 지원 PyTorch와 여유 VRAM이 있을 때만 사용한다. LLM이 GPU에서 실행돼도 proxy는 CPU로 계산할 수 있다. 기존 LLM 서비스와 GPU 메모리가 겹치면 proxy를 CPU나 다른 GPU에서 계산한다. 기존 서비스의 중지·재시작이 필요한 경우에는 서버의 원래 운영 절차만 사용한다. 모델 다운로드를 포함한 cold 비용과 캐시가 준비된 비용도 구분한다.
 
 새 환경을 CI와 같은 의존성 버전으로 맞추려면 저장소 루트에서 `python -m pip install uv`, `uv export --locked --no-emit-project --no-hashes --all-extras -o /tmp/lotus-constraints.txt`, `uv pip install --python "$(command -v python)" -e . datasets --constraint /tmp/lotus-constraints.txt`를 사용한다. 기존 1·2번 환경을 유지할 때는 패키지를 임의로 업그레이드하지 않는다. 서버에 GGUF가 없다면 기존 배포처·revision·정확한 파일명을 확인해 같은 파일을 복원하고 SHA를 대조한다.
 
-#### B. 설정 고정·가중치와 서버 기록
+#### B. 기존 endpoint·설정 유지와 기록
 
-경로 두 개를 **서버의 실제 기존 파일 절대 경로**로 바꾼다. Context·슬롯·GPU offload도 1·2번과 맞춘다. 예시 GPU layers=0은 CPU 추론이다. GPU 서버에서는 기존 offload 값으로 바꾸며 3·4·5번 사이에 변경하지 않는다. 기존 추가 chat-template 등의 인자는 아래 `server_command`에 함께 넣는다.
+기존 환경에 이미 있는 값은 보존하고, 비어 있는 값에만 코드 기본값을 넣는다. `LLM_MODEL`과 `LLM_API_BASE`는 기존 팀 환경 설정을 우선한다. 기본값과 실제 서버가 다르면 `/models` 확인 결과와 기존 설정에 맞춘다. `LLAMA_SERVER`·`MODEL_GGUF` 경로를 새로 채우는 것은 필수가 아니다. 로컬 연결에서는 `hosted_vllm/<기존 서버 모델 ID>` 형식만 허용해 `LLM_API_BASE`가 실제 LOTUS 요청에 적용되도록 검사한다. 다른 provider 접두어가 있으면 기존 서버의 모델 ID는 유지하고 연결용 접두어만 맞춘다.
 
 ```bash
-export LLAMA_SERVER=/absolute/path/to/llama.cpp/build/bin/llama-server
-export MODEL_GGUF=/absolute/path/to/the_same_model_as_experiments_1_2.gguf
-test -x "$LLAMA_SERVER"
-test -f "$MODEL_GGUF"
-export REACTION_SET=liver
-export PROMPT=paper
-export LLM_MODEL=hosted_vllm/llama3.1-8b
-export LLM_API_BASE=http://127.0.0.1:8080/v1
-export LLM_BATCH=4
-export EARLY_WORKERS=4
-export SERVER_PARALLEL=4
-export LLM_CONTEXT=32768
-export LLM_GPU_LAYERS=0
-export EMBED_DEVICE=cpu
-export N_ARTICLES=250
+export REACTION_SET="${REACTION_SET:-liver}"
+export PROMPT="${PROMPT:-paper}"
+export LLM_MODEL="${LLM_MODEL:-hosted_vllm/llama3.1-8b}"
+export LLM_API_BASE="${LLM_API_BASE:-http://127.0.0.1:8080/v1}"
+case "$LLM_MODEL" in
+  hosted_vllm/?*) ;;
+  *) printf '로컬 경로는 hosted_vllm/<기존 서버 모델 ID>를 사용하세요. 가중치는 변경하지 않습니다.\n' >&2; exit 1 ;;
+esac
+export LLM_BATCH="${LLM_BATCH:-4}"
+export EARLY_WORKERS="${EARLY_WORKERS:-4}"
+export EMBED_DEVICE="${EMBED_DEVICE:-cpu}"
+export N_ARTICLES="${N_ARTICLES:-250}"
+export SERVER_CACHE_POLICY="${SERVER_CACHE_POLICY:-existing_server_initial_kv_uncontrolled}"
 export BENCHMARK_DIR="$(pwd)"
 export R="$(pwd)/pruning_results/${REACTION_SET}_${PROMPT}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$(dirname "$R")"
 mkdir "$R"
-server_command=("$LLAMA_SERVER" --model "$MODEL_GGUF"
-  --alias "${LLM_MODEL#hosted_vllm/}" --host 127.0.0.1 --port 8080
-  --parallel "$SERVER_PARALLEL" --ctx-size "$LLM_CONTEXT" -ngl "$LLM_GPU_LAYERS")
-sha256sum "$MODEL_GGUF" "$LLAMA_SERVER" > "$R/server-files.sha256"
+curl_auth=()
+if [ -n "${HOSTED_VLLM_API_KEY:-}" ]; then
+  curl_auth=(-H "Authorization: Bearer $HOSTED_VLLM_API_KEY")
+fi
+curl "${curl_auth[@]}" --fail --silent --show-error --max-time 30 \
+  "${LLM_API_BASE%/}/models" > "$R/existing_server_models.json"
+if [ -f "${MODEL_GGUF:-}" ] && [ -r "${MODEL_GGUF:-}" ] && \
+   [ -f "${LLAMA_SERVER:-}" ] && [ -r "${LLAMA_SERVER:-}" ]; then
+  sha256sum "$MODEL_GGUF" "$LLAMA_SERVER" > "$R/server-files.sha256"
+fi
 {
-  cat "$R/server-files.sha256"
-  "$LLAMA_SERVER" --version
-  printf '%q ' "${server_command[@]}"
-  printf '\n'
-} > "$R/server-config.txt" 2>&1
+  printf 'source=existing_experiments_1_2_server\n'
+  printf 'model_alias=%s\nendpoint=%s\ncache_policy=%s\n' \
+    "$LLM_MODEL" "$LLM_API_BASE" "$SERVER_CACHE_POLICY"
+  if [ -f "$R/server-files.sha256" ]; then
+    cat "$R/server-files.sha256"
+  else
+    printf 'weights/build/launch_details=not_recorded; keep_existing_server_settings\n'
+  fi
+} > "$R/server-config.txt"
 export LLM_SERVER_ID="$(sha256sum "$R/server-config.txt" | cut -d' ' -f1)"
 printf 'set -euo pipefail\n' > "$R/settings.sh"
-for name in R LLAMA_SERVER MODEL_GGUF REACTION_SET PROMPT LLM_MODEL LLM_API_BASE \
-            LLM_BATCH EARLY_WORKERS SERVER_PARALLEL LLM_CONTEXT LLM_GPU_LAYERS EMBED_DEVICE N_ARTICLES LLM_SERVER_ID BENCHMARK_DIR; do
+for name in R REACTION_SET PROMPT LLM_MODEL LLM_API_BASE LLM_BATCH EARLY_WORKERS \
+            EMBED_DEVICE N_ARTICLES SERVER_CACHE_POLICY LLM_SERVER_ID BENCHMARK_DIR; do
   printf 'export %s=%q\n' "$name" "${!name}"
 done >> "$R/settings.sh"
-declare -p server_command >> "$R/settings.sh"
 git rev-parse HEAD > "$R/code_commit.txt"
 python -m pip freeze > "$R/python_packages.txt"
 printf 'Study directory: %s\n' "$R"
@@ -363,27 +369,17 @@ fresh() {
 }
 ```
 
-`R`은 비교 전체에서 한 번만 만든다. 새 터미널에서는 출력된 실제 절대 경로의 `settings.sh`를 source한다. 시각으로 `R`을 다시 만들면 별도 비교 폴더가 된다. API 키 등의 비밀 정보는 기록하지 않는다. `LLM_SERVER_ID`는 기록한 가중치·서버·명령의 식별자를 manifest에 남기며 변경 시 같은 출력 폴더의 재개를 막는다. **실제 서버 가중치를 자동 검증하는 기능은 아니므로 기록과 실제 실행 명령을 일치시켜야 한다.**
+기존 설정 파일·시작 로그에서 가중치 revision·양자화·서버 버전·시작 명령을 확인할 수 있으면 **위 fingerprint를 생성하기 전에** 그 내용을 `server-config.txt` 생성 블록에 추가한다. 인증 정보는 기록하지 않는다. Endpoint URL에도 비밀 키를 넣지 않는다. 기존 인증은 환경에서 재사용하며 `settings.sh`에 키를 저장하지 않는다.
 
-`EARLY_WORKERS`는 동시 논문 수다. 한 논문은 한 pair씩 평가하므로 여기서 실제 동시 요청 수를 정한다. `LLM_BATCH`는 한 번의 LM 호출 안의 상한이며 이번 실행기의 논문 병렬도를 늘리지 않는다. `SERVER_PARALLEL`은 서버 슬롯 수다. 세 값을 같은 의미로 해석하지 않는다.
+`R`은 비교 전체에서 한 번만 만든다. 새 터미널에서는 같은 환경과 기존 인증을 활성화하고, 출력된 절대 경로의 `settings.sh`를 source한다. `LLM_SERVER_ID`는 기록한 설정의 식별자다. 파일 SHA를 확보하지 못했다면 **기록의 일치만 확인하며 실제 가중치 동일성을 증명하지 않는다.** 미확인 정보 때문에 새 모델·새 설정을 선택하지 않고 기존 서비스를 유지한다.
 
-#### C. 별도 서버 터미널: 각 run 직전 같은 명령으로 시작
+`EARLY_WORKERS`는 동시 논문 수, `LLM_BATCH`는 한 LM 호출 안의 상한, 서버 슬롯 수는 기존 서비스 설정이다. 세 값을 같은 의미로 해석하지 않으며 서버 context·슬롯·GPU offload를 이 PR의 예시로 덮어쓰지 않는다. 본문 8,000문자와 프롬프트·출력을 수용하는 context인지 기존 시작 로그에서 확인한다.
 
-별도 Bash 터미널에서 실제 `settings.sh` 경로를 사용한다. 3번 run 직전에 시작하고 종료 후 Ctrl+C로 서버를 멈춘다. 4번·5번도 같은 명령으로 재시작하고 같은 짧은 사전 점검을 실행하면 이전 run의 prompt KV cache를 넘기지 않는다. 각 run 내부의 자연스러운 prefix cache 재사용은 유지된다. 과거 1·2번과 시간 비교 시 당시 cache 절차도 구분한다.
+#### C. 기존 서버의 운영·캐시 절차 유지
 
-```bash
-set -euo pipefail
-source /absolute/path/printed_above/settings.sh
-RUN=experiment3  # 다음은 experiment4, 그 다음은 experiment5_conservative
-sha256sum --check --status "$R/server-files.sha256"
-test "$(sha256sum "$R/server-config.txt" | cut -d' ' -f1)" = "$LLM_SERVER_ID"
-test ! -e "$R/${RUN}_server.log"
-"${server_command[@]}" 2>&1 | tee "$R/${RUN}_server.log"
-```
+이미 서비스가 실행 중이면 그 endpoint를 그대로 사용한다. 서비스가 중지돼 있으면 **서버에 원래 준비된 시작 스크립트·서비스·작업 절차로 복구**한다. 이 문서의 추정값으로 별도 `llama-server`를 띄우지 않는다.
 
-서버 시작과 사전 점검마다 실제 GGUF·바이너리 파일의 SHA를 다시 확인한다. 같은 경로의 파일이 교체돼도 감지하며, 실패하면 이전 결과와 이어서 실행하지 않는다. 파일 검사는 실험 타이머 밖에서 수행한다.
-
-Context는 **요청/슬롯당 실제 토큰 한도**를 시작 로그에서 확인한다. `--ctx-size 32768`과 4슬롯의 관계는 llama.cpp 버전·KV 설정에 따라 달라 일률적으로 8,192/slot이라고 가정하지 않는다. 본문 8,000**문자**에 프롬프트와 최대 256 출력 토큰까지 수용해야 하며 context 부족으로 본문을 생략하는 설정을 쓰지 않는다.
+각 live run 전에 같은 운영·캐시 절차를 적용하고 `SERVER_CACHE_POLICY`에 기록한다. 원래 재시작/캐시 초기화 절차를 이용할 수 있으면 3·4·5번에 동일하게 적용한다. 그대로 실행 중인 서비스를 쓸 경우에는 초기 KV cache 상태가 통제되지 않았음을 기록하고, 그 시간값을 cold-start 비교로 해석하지 않는다. 기존 1·2번과 시간 비교할 때도 측정 범위와 캐시 조건을 확인한다. LOTUS 응답 cache는 기본 False이며 서버 KV cache와 별개다.
 
 #### D. 실험 터미널: 실제 LOTUS 로컬 연결 사전 점검
 
@@ -392,11 +388,21 @@ Context는 **요청/슬롯당 실제 토큰 한도**를 시작 로그에서 확�
 ```bash
 preflight() {
   local run_name="$1"
+  case "$LLM_MODEL" in
+    hosted_vllm/?*) ;;
+    *) printf '로컬 경로는 hosted_vllm/<기존 서버 모델 ID>가 필요합니다.\n' >&2; return 1 ;;
+  esac
   fresh "$R/${run_name}_preflight.log" "$R/${run_name}_models.json"
-  sha256sum --check --status "$R/server-files.sha256"
+  if [ -f "$R/server-files.sha256" ]; then
+    sha256sum --check --status "$R/server-files.sha256"
+  fi
   test "$(sha256sum "$R/server-config.txt" | cut -d' ' -f1)" = "$LLM_SERVER_ID"
-  curl --fail --silent --show-error --max-time 30 "${LLM_API_BASE%/v1}/health" > /dev/null
-  curl --fail --silent --show-error --max-time 30 "$LLM_API_BASE/models" > "$R/${run_name}_models.json"
+  local -a auth=()
+  if [ -n "${HOSTED_VLLM_API_KEY:-}" ]; then
+    auth=(-H "Authorization: Bearer $HOSTED_VLLM_API_KEY")
+  fi
+  curl "${auth[@]}" --fail --silent --show-error --max-time 30 \
+    "${LLM_API_BASE%/}/models" > "$R/${run_name}_models.json"
   python - "$R/${run_name}_models.json" <<'PY'
 import json, os, sys
 ids = [entry['id'] for entry in json.load(open(sys.argv[1]))['data']]
@@ -417,7 +423,7 @@ PY
 declare -f fresh preflight >> "$R/settings.sh"
 ```
 
-기본 로컬 경로는 외부 OpenAI API 키가 필요 없다. 위 서버 예시는 인증을 설정하지 않는다. 서버에 인증을 추가했다면 curl에도 해당 인증을 적용하고 LiteLLM의 `HOSTED_VLLM_API_KEY`를 설정하되 기록에는 남기지 않는다. 접속 오류·alias 불일치·빈 응답이 있으면 본 실험을 시작하지 않는다. LOTUS 응답 cache는 기본 False이며 서버의 prompt/KV cache와 별개다.
+기본 로컬 경로는 외부 OpenAI API 키가 필요 없다. 기존 서버 인증이 필요하면 기존 `HOSTED_VLLM_API_KEY` 환경값을 사용한다. 위 curl 점검도 이를 재사용하며 키를 기록하지 않는다. `/health` 같은 엔진 전용 endpoint는 선택 점검이며 공통 절차는 `/models`와 실제 LOTUS 요청으로 확인한다. 접속 오류·alias 불일치·빈 응답이 있으면 본 실험을 시작하지 않는다. LOTUS 응답 cache는 기본 False이며 서버의 prompt/KV cache와 별개다.
 
 ### 11.1 실험 3: E5 점수 → 서버 점검 → 3번 실행
 
@@ -430,7 +436,7 @@ fresh "$R/test_e5.json" "$R/test_e5_score_wall_s.txt" "$R/test_e5_score.log"
   --device "$EMBED_DEVICE" --output "$R/test_e5.json" > "$R/test_e5_score.log" 2>&1
 ```
 
-서버 터미널을 `RUN=experiment3`으로 시작한 뒤 이어서 실행한다. **3번에는 threshold를 넣지 않는다.**
+기존 LLM 서비스가 준비된 상태에서 다음 점검과 실행을 진행한다. **3번에는 threshold를 넣지 않는다.**
 
 ```bash
 preflight experiment3
@@ -442,11 +448,11 @@ test -s "$R/experiment3/summary.json"
 test -s "$R/experiment3/articles.json"
 ```
 
-완료되면 `experiment3/manifest.json`, `progress.jsonl`, `articles.json`, `summary.json`이 생성된다. 서버를 멈추고 4번 점수를 준비한다. **저장된 score를 다시 생성하지 않는다.** 중단됐다면 기존 score·timer를 보존하고 11.4 재개 절차를 쓴다.
+완료되면 `experiment3/manifest.json`, `progress.jsonl`, `articles.json`, `summary.json`이 생성된다. 기존 서버 운영 설정을 유지한 채 4번 점수를 준비한다. **저장된 score를 다시 생성하지 않는다.** 중단됐다면 기존 score·timer를 보존하고 11.4 재개 절차를 쓴다.
 
 ### 11.2 실험 4: BioLORD 점수·threshold 준비 → 4번 실행
 
-사전 설정: 3번 완료, 같은 논문 수·패널·프롬프트·LLM 설정을 확인한다. 서버는 임베딩 중 멈춰도 된다. Validation 전체로 두 threshold를 정하고 **4번 test의 LLM 결과를 보기 전에 고정**한다. Threshold 계산 자체는 4번 LLM 실행이 필요 없다.
+사전 설정: 3번 완료, 같은 논문 수·패널·프롬프트·LLM 설정을 확인한다. Proxy 장치는 기존 LLM 서비스와 메모리가 충돌하지 않도록 선택한다. Validation 전체로 두 threshold를 정하고 **4번 test의 LLM 결과를 보기 전에 고정**한다. Threshold 계산 자체는 4번 LLM 실행이 필요 없다.
 
 ```bash
 test -s "$R/experiment3/summary.json"
@@ -477,7 +483,7 @@ print(json.dumps(calibration['policies'], indent=2))
 PY
 ```
 
-불일치하면 진행하지 않는다. Model·tokenizer 버전이 달라졌다면 새 비교 폴더에서 동일 조건으로 다시 준비한다. 기존 score를 덮어써서 맞추지 않는다. 이제 서버 터미널을 같은 명령의 `RUN=experiment4`로 다시 시작한다. **4번에도 threshold를 넣지 않는다.**
+불일치하면 진행하지 않는다. Model·tokenizer 버전이 달라졌다면 새 비교 폴더에서 동일 조건으로 다시 준비한다. 기존 score를 덮어써서 맞추지 않는다. 기존 endpoint·모델·운영/캐시 절차를 유지한 상태에서 4번 연결 점검을 진행한다. **4번에도 threshold를 넣지 않는다.**
 
 ```bash
 preflight experiment4
@@ -506,7 +512,7 @@ python semijoin_pruning.py replay "$R/test_biolord.json" \
   --source-dir "$R/experiment4" --output "$R/experiment5_retain95_replay.json"
 ```
 
-주 조건은 사전에 정한 `conservative`이며 test 결과를 보고 바꾸지 않는다. 서버를 같은 명령의 `RUN=experiment5_conservative`로 다시 시작하고 실제 시간을 잰다.
+주 조건은 사전에 정한 `conservative`이며 test 결과를 보고 바꾸지 않는다. 같은 기존 서비스와 운영/캐시 절차를 사용해 실제 시간을 잰다.
 
 ```bash
 preflight experiment5_conservative
@@ -519,13 +525,13 @@ test -s "$R/experiment5_conservative/summary.json"
 test -s "$R/experiment5_conservative/articles.json"
 ```
 
-전부 prune되면 `progress.jsonl`이 없어도 정상이다. `retain_95`를 replay만 했다면 실제 시간은 미측정으로 표시한다. 이 조건도 실측하려면 policy·폴더·timer·log 이름을 모두 분리하고 같은 서버 초기화·사전 점검을 적용한다.
+전부 prune되면 `progress.jsonl`이 없어도 정상이다. `retain_95`를 replay만 했다면 실제 시간은 미측정으로 표시한다. 이 조건도 실측하려면 policy·폴더·timer·log 이름을 모두 분리하고 같은 기존 서버 운영/캐시 절차와 사전 점검을 적용한다.
 
 ### 11.4 중단 시 재개
 
 같은 설정·score·출력 폴더로 실행하면 미완료 논문만 재개한다. **score 생성이나 원래 timer를 다시 실행하지 않는다.** 아래는 3번 예시다. 사전 점검도 새 이름으로 실행하고 재개 log·timer에 새 번호를 쓴다.
 
-새 실험 터미널에서는 원래 Python 환경을 활성화하고 `source /실제/기존/R/settings.sh` 후 `cd "$BENCHMARK_DIR"`를 실행한다. 위 D단계는 `fresh`·`preflight` 함수도 settings 파일에 보존하므로 재접속 후 사용할 수 있다. 서버도 끊겼다면 서버 터미널의 `RUN=experiment3_resume1`처럼 새 로그 이름으로 같은 명령을 다시 시작한다.
+새 실험 터미널에서는 원래 Python 환경을 활성화하고 `source /실제/기존/R/settings.sh` 후 `cd "$BENCHMARK_DIR"`를 실행한다. 위 D단계는 `fresh`·`preflight` 함수도 settings 파일에 보존하므로 재접속 후 사용할 수 있다. 서버도 끊겼다면 기존 서버의 원래 서비스·시작 절차로 복구한다. 새 모델이나 추정 실행 인자로 대체하지 않는다.
 
 ```bash
 preflight experiment3_resume1
@@ -572,7 +578,7 @@ PY
 
 합계는 test score 생성과 live run을 별도로 측정한 시간의 합이며 단일 프로세스 end-to-end 실측은 아니다. Validation 준비 시간은 별도다. 4·5번이 score를 공유하더라도 각 방법의 비용에는 각각 BioLORD score 생성 비용을 포함한다. 3·4번 gold 순위는 같은 정답 양성 ID 전체로 비교하고, 5번의 순서가 4번보다 좋아졌다는 근거로 쓰지 않는다.
 
-`server-config.txt`·GGUF SHA·바이너리 버전·실제 명령·각 run 시작 로그까지 함께 확인한다. Live 결과 차이는 4번의 동일 판정을 쓰는 replay와 분리해 LLM 응답 변동도 검토한다.
+`server-config.txt`와 기존 서버의 설정·운영/캐시 절차를 확인한다. GGUF SHA·바이너리 버전·실제 시작 명령은 확인 가능한 경우 함께 보존하며, 미확인 항목은 동일성을 검증한 것처럼 쓰지 않는다. Live 결과 차이는 4번의 동일 판정을 쓰는 replay와 분리해 LLM 응답 변동도 검토한다.
 
 ## 13. 자동 검증과 서버 실험
 
