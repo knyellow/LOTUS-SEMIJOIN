@@ -232,6 +232,15 @@ class TestSemijoinPruning(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "finite scores"):
                     pruning.calibrate(scores, 1.0)
 
+    def test_score_command_preserves_existing_artifact_before_loading_models(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scores.json"
+            original = b'{"existing": "score artifact"}'
+            path.write_bytes(original)
+            with self.assertRaisesRegex(ValueError, "Score output already exists"):
+                pruning.make_scores(SimpleNamespace(output=path))
+            self.assertEqual(path.read_bytes(), original)
+
     def test_experiment_model_and_gate_selection_and_abstract_identity(self):
         no_gate = SimpleNamespace(experiment=4, threshold=None, calibration=None)
         self.assertEqual(pruning.threshold_from_args(no_gate, self.scores), (None, {"kind": "disabled"}))
@@ -370,6 +379,20 @@ class TestSemijoinPruning(unittest.TestCase):
             self.assertEqual(replay["summary"]["experiment"], 5)
             self.assertEqual((replay["summary"]["lm_calls"], replay["summary"]["n_positive_pruned"]), (1, 1))
             baseline.configure.assert_called_with(with_retriever=False)
+            manifest_path = root / "run4" / "manifest.json"
+            mismatched = pruning.read_json(manifest_path)
+            mismatched["model"] = "hosted_vllm/different-model"
+            pruning.save_json(manifest_path, mismatched)
+            with self.assertRaisesRegex(ValueError, "Source results disagree"):
+                pruning.replay(
+                    SimpleNamespace(
+                        scores=root / "scores4.json",
+                        threshold=0.5,
+                        calibration=None,
+                        source_dir=root / "run4",
+                        output=root / "wrong-model-replay.json",
+                    )
+                )
 
     @unittest.skipUnless(importlib.util.find_spec("litellm"), "Real LOTUS dependencies are installed in CI.")
     def test_real_lotus_pair_formatting_parsing_and_early_stop(self):
@@ -435,6 +458,10 @@ class TestSemijoinPruning(unittest.TestCase):
                     pruning.run(args)
                 baseline.configure.assert_not_called()
                 self.assertEqual((args.output_dir / "summary.json").read_bytes(), measured)
+                with patch.dict("os.environ", {"LLM_SERVER_ID": "different-weights-or-server-settings"}):
+                    with self.assertRaisesRegex(ValueError, "different configuration"):
+                        pruning.run(args)
+                baseline.configure.assert_not_called()
                 altered_summary = pruning.read_json(args.output_dir / "summary.json")
                 altered_summary["threshold"] = 0.6
                 pruning.save_json(args.output_dir / "summary.json", altered_summary)

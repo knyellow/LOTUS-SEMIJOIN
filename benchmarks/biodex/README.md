@@ -1,3 +1,5 @@
+> 팀 semi-join 실험 3·4·5는 아래 upstream JoinAndRerank 실행과 다릅니다. 로컬 경량 LLM을 쓰는 [한국어 가이드 11절](NEGATIVE_PRUNING_GUIDE.ko.md#11-서버-명령-3--4--5-순서대로)을 따라 진행하세요.
+
 Instructions for running biodex pipeline:
 
 Setup:
@@ -30,55 +32,27 @@ You can find example results I ran earlier in biodex_results/Mar-17-25, which ga
 +-------------------------+--------+---------+-------------+
 ```
 
-## Abstract proxy 기반 semi-join: 실험 3·4·5
+## Abstract proxy 기반 semi-join: 실험 3 → 4 → 5
 
-[한국어 코드 설명·지표·전체 서버 명령](NEGATIVE_PRUNING_GUIDE.ko.md)에서 작은 코드 단위와 호출 경로를 확인할 수 있습니다.
+전체 사전 설정·로컬 서버 명령·복사 가능한 실험별 명령은 [한국어 코드 설명과 실행 가이드](NEGATIVE_PRUNING_GUIDE.ko.md)에 정리했습니다. **11.0 공통 준비 → 11.1 실험 3 → 11.2 실험 4 → 11.3 실험 5** 순서입니다.
 
-| 실험 | Proxy 모델 | Pruning |
-|---|---|---|
-| 3 | E5-base-v2 | 없음 |
-| 4 | BioLORD-2023 | 없음 |
-| 5 | BioLORD-2023 | 최대 라벨 점수가 threshold 미만이면 논문 전체 생략 |
+| 순서 | 실행 전 준비 | 실행 | 확인할 결과 |
+|---|---|---|---|
+| 공통 | 기존 1·2번 Python 환경·같은 GGUF·llama-server·실행 설정 확인 | 서버는 각 live run 직전에 동일 명령으로 시작 | 가중치 SHA·서버 버전·명령·설정 기록 |
+| 3 | 같은 test 논문의 E5 점수, 서버 연결 점검 | `run ... --experiment 3` | 3번 summary·articles·progress |
+| 4 | BioLORD test·validation 점수, threshold 고정, 두 모델의 입력·chunk 일치 검사 | `run ... --experiment 4` | 4번 완료 결과와 보존된 BioLORD 점수 |
+| 5 | 같은 BioLORD 점수·validation threshold·4번 완료 결과 | 두 정책 replay → `run ... --experiment 5 --calibration ... --policy conservative` | 두 정책 호출 수·품질, 보수적 조건 실제 시간 |
 
-Proxy는 **abstract 전체를 같은 조각으로 나누어** 임베딩합니다. 각 조각은 E5·BioLORD 양쪽 tokenizer에서 special token과 E5 `passage: ` 접두어까지 포함해 128토큰 이내입니다. 조각은 겹치지 않고 원문 전체를 보존합니다. 논문–라벨 점수는 각 조각의 정규화 cosine similarity 중 최댓값입니다. E5 라벨에는 `query: ` 접두어를 붙이고 BioLORD에는 접두어를 사용하지 않습니다. LLM 입력은 모든 조건에서 기존 **`fulltext_processed[:8000]`**입니다.
+코드 기본값은 `hosted_vllm/llama3.1-8b`와 로컬 `http://127.0.0.1:8080/v1`입니다. 이는 LiteLLM을 통한 OpenAI 호환 경로이며 실제 서버는 llama.cpp `llama-server`를 사용할 수 있습니다. 코드가 LLM 가중치를 다운로드하거나 서버를 시작하는 것은 아닙니다. 과거 N=250의 정확한 가중치·양자화·서버 설정은 저장소만으로 확정하지 못하므로 **기존 1·2번의 파일과 설정을 먼저 확인하고 재사용**합니다. 외부 OpenAI 유료 모델로 자동 전환하지 않습니다.
 
-기존 LOTUS `SentenceTransformersRM`과 팀의 pairwise 조기 종료 실행기를 재사용합니다. 아래는 `benchmarks/biodex`에서 실행하는 최소 예시입니다. 먼저 `python -m pip install -e ../.. datasets`로 현재 checkout을 설치하고 LLM 서버를 실행합니다. `REACTION_SET`, `PROMPT`, `LLM_MODEL`, `LLM_API_BASE`, `LLM_BATCH`, `EARLY_WORKERS`는 비교군과 동일하게 맞춥니다. 혈액 패널은 `REACTION_SET=haematologic`과 별도 출력 경로를 사용합니다.
+Proxy는 abstract 전체를 두 tokenizer에서 모두 128토큰 이내인 동일한 조각으로 나누며, 논문–라벨 점수는 조각별 cosine similarity의 최대입니다. E5는 문서 `passage: `·라벨 `query: ` 접두어를 쓰고 BioLORD는 접두어 없이 씁니다. **LLM 입력은 기존 `fulltext_processed[:8000]`**입니다. 빈 abstract·무효 embedding은 원래 순서로 평가하고 pruning하지 않습니다.
 
-```bash
-export REACTION_SET=liver
-R=pruning_results/liver_paper
-mkdir -p "$R"
+3·4번에는 threshold를 넣지 않습니다. 5번의 threshold는 validation의 정답과 점수만으로 정해 추가 LLM 호출이 없으며 4번 test 결과 전에 고정합니다. `conservative`를 주 조건, `retain_95`를 보조 조건으로 보고합니다. Validation 보존율이 test의 무누락을 보장하지는 않습니다.
 
-# 준비: validation BioLORD + threshold, test E5/BioLORD. LLM 호출 0회.
-python semijoin_pruning.py score --model biolord --split validation --device cuda \
-  --output "$R/validation_biolord.json"
-python semijoin_pruning.py calibrate "$R/validation_biolord.json" --output "$R/thresholds.json"
-python semijoin_pruning.py score --model e5 --split test --n-articles 250 --device cuda \
-  --output "$R/test_e5.json"
-python semijoin_pruning.py score --model biolord --split test --n-articles 250 --device cuda \
-  --output "$R/test_biolord.json"
+같은 비교에서는 `input_sha256`, `chunks_sha256`, `scorer.chunking`, `reactions`가 일치해야 합니다. 4·5번에는 같은 BioLORD 점수 파일을 씁니다. **Score는 덮어쓰지 않고 재개·replay에 그대로 재사용**하며 새 측정에는 새 출력·timer를 사용합니다. 가이드의 `fresh` 검사가 기존 파일을 보호합니다.
 
-# 3·4번: threshold 없이 모든 논문을 정렬된 순서로 평가.
-python semijoin_pruning.py run "$R/test_e5.json" --experiment 3 --output-dir "$R/experiment3"
-python semijoin_pruning.py run "$R/test_biolord.json" --experiment 4 --output-dir "$R/experiment4"
+응답 cache는 기본적으로 꺼져 있지만 서버 KV cache는 별개이므로 live run마다 같은 서버 초기화·짧은 사전 점검을 적용합니다. `EARLY_WORKERS`는 논문 병렬도, `LLM_BATCH`는 LM 호출 내부 상한, 서버 `--parallel`은 슬롯 수입니다. 본문 8,000자와 프롬프트·출력을 수용할 실제 슬롯당 context를 시작 로그에서 확인합니다.
 
-# 5번의 두 threshold: 완료된 4번 결과로 재생. 추가 LLM 호출 0회.
-python semijoin_pruning.py replay "$R/test_biolord.json" --calibration "$R/thresholds.json" \
-  --policy conservative --source-dir "$R/experiment4" --output "$R/experiment5_conservative_replay.json"
-python semijoin_pruning.py replay "$R/test_biolord.json" --calibration "$R/thresholds.json" \
-  --policy retain_95 --source-dir "$R/experiment4" --output "$R/experiment5_retain95_replay.json"
+결과는 `manifest.json`, `progress.jsonl`, `articles.json`, `summary.json`에 남깁니다. `LLM_SERVER_ID`와 manifest 해시는 실행 설정·결과 혼용을 검출하지만 실제 서버 파일을 자동 확인하지는 않습니다. 생략 논문도 F1의 전체 분모에 남기며, 논리적 pair 호출·F1/recall·gold/LLM witness 순위·양성 생략을 기록합니다. `n_positive_pruned`와 4번 대비 추가 FN은 다릅니다.
 
-# 5번 실제 실행: 선택한 정책의 wall time은 이 명령을 별도로 실측.
-python semijoin_pruning.py run "$R/test_biolord.json" --experiment 5 \
-  --calibration "$R/thresholds.json" --policy conservative --output-dir "$R/experiment5_conservative"
-```
-
-CPU 임베딩은 `--device cpu`로 지정합니다. 위 test 앞 250편을 바꾸면 E5·BioLORD 양쪽에 같은 개수를 사용합니다. 모델별 test 점수의 `input_sha256`, `chunks_sha256`, `scorer.chunking`, `reactions`가 일치해야 합니다. 전체 `scorer`의 모델·접두어는 두 모델에서 다른 것이 정상입니다. 4·5번에는 같은 BioLORD 점수 파일을 사용합니다. 기존 본문 prefix 점수와 calibration은 새 조각 표현으로 다시 생성해야 합니다.
-
-Calibration은 validation의 정답 라벨과 proxy 점수만 사용하므로 4번 LLM 실행을 먼저 할 필요가 없습니다. `conservative`는 validation 정답 양성을 모두, `retain_95`는 최소 95%를 유지하는 경계를 선택합니다. 적은 양성 수나 동점 때문에 두 값이 같아질 수 있으며 test 보존율을 보장하지는 않습니다. `--threshold NUMBER`로 미리 정한 값을 전달할 수도 있습니다. Threshold와 같은 점수·무효 점수·빈 abstract는 생략하지 않으며 proxy가 무효이면 원래 라벨 순서로 LLM 평가합니다.
-
-출력은 `manifest.json`, `progress.jsonl`, `articles.json`, `summary.json`입니다. 생략된 논문도 전체 결과에 남기며 정답 양성이면 F1의 FN에 포함합니다. Article-level precision·recall·F1, gate의 양성 보존율, 생략한 양성 수, 논리적 pair 호출 수, 첫 LLM 수락 순위를 저장합니다. 첫 정답 라벨 순위는 논문별로 별도 기록합니다. `n_positive_pruned`는 4번 대비 추가 누락과 다릅니다. 실제 HTTP 재시도 수나 미완료 논문의 호출은 완료 기록의 합계에 포함되지 않습니다.
-
-Replay는 같은 점수 파일을 사용한 완료 실행의 진행 기록·결과·요약을 검증합니다. 이전에 생략한 논문을 살리려는데 원본 판정이 없으면 중단합니다. Replay의 호출 수·F1은 정책 비교에 쓰되 실제 실행시간으로 해석하지 않습니다. `estimated_embedding_plus_run_time_s`는 일부 임베딩 준비·점수 구간과 run 구간을 더한 추정치이며 재개하면 전체 추정치를 제공하지 않습니다. 전체 명령 wall time은 가이드의 `/usr/bin/time` 예시로 측정합니다.
-
-같은 출력 폴더는 설정이 완전히 같은 재개에만 사용하며 한 프로세스만 기록합니다. 로그·타이머 파일은 출력 폴더 바깥에 저장합니다. 공통 LOTUS pair 판정과 parser는 기존 baseline 동작을 유지합니다.
+Replay는 호출 수·품질을 재계산하며 실제 실행시간을 재현하지 않습니다. 시간 비교는 test 점수 생성과 무중단 live run의 외부 wall time을 사용하고 validation 준비 비용을 별도로 표시합니다. 재개·완료 재호출의 짧은 시간으로 원래 timer를 덮어쓰거나 전체 시간이라고 보고하지 않습니다. 코드 호출 경로와 저장 지표의 세부 의미는 가이드 2~10절, 결과 확인 코드는 12절을 참고합니다.

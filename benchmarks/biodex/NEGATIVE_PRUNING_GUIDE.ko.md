@@ -14,15 +14,15 @@
 
 | 순서 | 작업 | 필요한 입력 | LLM 호출 |
 |---|---|---|---|
-| 준비 1 | BioLORD validation 점수 생성 → threshold 결정 | Validation abstract + 정답 반응 | 0회 |
-| 준비 2 | Test E5·BioLORD 점수 생성 | 같은 test 논문·라벨 | 0회 |
-| 본 실험 | 3번·4번 실행 | 해당 모델의 test 점수 | 모든 논문, 첫 매칭에서 종료 |
-| 빠른 비교 | 4번 결과에 threshold 두 개를 replay | 완료된 4번 + validation threshold | 추가 0회 |
-| 시간 측정 | 선택한 threshold로 5번 실제 실행 | 같은 BioLORD test 점수 | 유지한 논문만 평가 |
+| 공통 준비 | 1·2번의 환경·로컬 GGUF·서버 설정 확인 | 같은 가중치·양자화·프롬프트·패널·논문 수 | 사전 점검만 |
+| **3번** | E5 test 점수 생성 → 로컬 LLM 점검 → 3번 실행 | Test abstract + E5 점수 | 첫 매칭에서 종료 |
+| 4번 준비 | BioLORD test·validation 점수 생성 → threshold 고정 | Validation abstract + 정답 반응 | 0회 |
+| **4번** | 두 proxy의 입력 일치 확인 → 로컬 LLM 점검 → 4번 실행 | 3번과 같은 test 논문·라벨 | 첫 매칭에서 종료 |
+| **5번** | 완료된 4번으로 두 정책 replay → 보수적 5번 실측 | 같은 BioLORD 점수 + 고정 threshold | Replay 0회, 실측은 유지한 논문만 |
 
 **Threshold를 정하려고 4번 LLM 실험을 먼저 돌릴 필요는 없다.** Validation 점수와 정답만으로 결정한다. 4번을 먼저 확보하는 이유는 두 threshold의 F1·호출 수를 추가 LLM 실행 없이 비교하기 위해서다. Test 결과를 보고 threshold를 다시 조정하지 않고, validation에서 정한 두 정책을 그대로 보고한다.
 
-4번 결과가 없어도 5번을 바로 실행할 수 있다. 보수적인 5번의 완료 결과에서 더 공격적인 threshold를 replay하는 것도 가능하다. 다만 원본에서 생략한 논문을 다시 살리는 조건은 해당 논문의 LLM 결과가 없어 재생할 수 없다.
+이번 실행 순서는 **3 → 4 → 5**로 고정한다. 5번의 주 조건은 `conservative`, 보조 조건은 `retain_95`이며 test 결과를 보기 전에 정한다. 두 정책이 같은 threshold이면 동일 조건으로 보고한다. 이미 저장한 점수는 재생성하지 않고 재사용한다.
 
 ## 2. 파일과 호출 경로
 
@@ -239,6 +239,8 @@ run_early_stop
 
 `replay`는 완료된 원본의 점수 해시·threshold·진행 기록·결과·요약을 대조한 다음 새 gate를 적용한다. 4번의 완료 결과에는 모든 논문의 LLM 결과가 있으므로 두 threshold를 추가 호출 없이 재생할 수 있다. 재생 결과는 호출 수와 품질을 비교할 수 있지만 **그 조건의 실제 실행시간은 제공하지 않는다**.
 
+요약의 `manifest_sha256`으로 LLM·프롬프트·실험 설정과 결과를 연결해 다른 실행의 manifest가 섞인 경우도 거부한다. 이 필드가 없는 이전 결과는 최신 형식으로 새 실행을 준비해야 한다. 점수 생성은 기존 출력 파일 덮어쓰기를 거부한다. 점수 내용이 같아도 새로 잰 임베딩 시간이 달라지면 파일 해시가 달라지므로, 재개·replay에는 최초 점수 파일을 그대로 보존한다.
+
 같은 폴더는 동일 설정 재개에만 사용한다. 출력 폴더는 실행기가 만들게 두고 로그와 외부 타이머 파일은 바깥에 저장한다. 마지막 JSONL을 쓰다 종료됐다면 미완성 꼬리만 복구하며 완료된 논문은 다시 평가하지 않는다.
 
 ## 10. 지표 수집 범위
@@ -262,126 +264,318 @@ run_early_stop
 
 토큰 수·HTTP 재시도 수·parser 실패율·RP@5·RP@10은 별도 출력하지 않는다. 중단된 미완료 논문에서 이미 발생한 요청도 완료 기록의 합계에는 없다. 비용·시간 본 실험은 새 폴더에서 중단 없이 실행한다.
 
-## 11. 서버 명령: 복사해서 실행하기
+## 11. 서버 명령: 3 → 4 → 5 순서대로
 
-Linux Bash 기준이며 저장소 루트에서 시작한다. LLM 추론 서버는 별도로 먼저 실행한다. 아래 모델명·프롬프트·병렬도는 기존 기본값 예시이므로 팀의 실제 비교군 설정과 맞춘다.
+Linux Bash 기준이다. **실제 LLM 평가 순서는 3번 run → 4번 run → 5번 run**이다. 점수 생성·validation 보정·replay는 LLM을 호출하지 않는다. 각 단계가 성공하고 저장 파일을 확인한 뒤 다음 단계로 진행한다.
+
+### 11.0 공통 준비
+
+| 설정 | 확인할 내용 |
+|---|---|
+| Python | 기존 1·2번 환경 우선 재사용. 새 환경은 Python 3.10~3.12 |
+| 논문·라벨·질문 | 기존 1·2번과 같은 N·panel·PROMPT. 예시는 앞 250편, liver, paper |
+| LLM | 기존 1·2번의 같은 GGUF 파일·양자화·revision |
+| 서버 | 같은 llama.cpp 바이너리·chat template·context·슬롯 수·GPU 설정 |
+| Proxy 장치 | EMBED_DEVICE=cpu 또는 cuda. LLM 추론 장치와 별개 |
+| 저장 경로 | 이번 비교 전체의 새 R. experiment3/4/5 폴더는 실행기가 생성 |
+
+기본 경로는 `hosted_vllm/llama3.1-8b` → `http://localhost:8080/v1`이다. `hosted_vllm/`은 LiteLLM의 OpenAI 호환 서버 연결 이름이며 실제 서버가 반드시 vLLM이어야 한다는 뜻은 아니다. **코드는 LLM을 자동 다운로드하거나 서버를 시작하지 않는다.** 로컬 `llama-server`에 가중치를 올려 둬야 하며 외부 유료 OpenAI 모델로 자동 전환하지 않는다.
+
+인접 `biodex_local.py`에는 llama.cpp·Q4_K_M이 명시돼 있고 초기 N=25 커밋에는 Llama-3.1-8B Q4가 적혀 있다. 다만 **완료된 N=250 실험 1·2번의 실제 GGUF·양자화·서버 명령은 이 기록만으로 확정할 수 없다.** 아래 alias는 코드 기본값 예시다. 기존 실행이 다른 모델이면 파일과 alias를 맞춘다. Alias 일치는 가중치 동일성의 증명이 아니다.
+
+#### A. Python 환경과 코드
+
+기존 1·2번 환경을 활성화한 뒤 저장소 루트에서 시작한다. 새 환경이 필요한 경우에만 첫 두 줄을 실행한다.
 
 ```bash
+python3.10 -m venv .venv
+source .venv/bin/activate
+
+set -euo pipefail
 git fetch origin
 git switch feat/biolord-negative-pruning
 git pull --ff-only
 python -m pip install -e . datasets
+python - <<'PY'
+import sys, torch, lotus
+print('python:', sys.version, 'lotus:', lotus.__file__)
+print('torch:', torch.__version__, 'CUDA:', torch.cuda.is_available())
+assert (3, 10) <= sys.version_info[:2] < (3, 13)
+PY
 cd benchmarks/biodex
+```
 
+`cuda` 임베딩은 CUDA 지원 PyTorch와 여유 VRAM이 있을 때만 사용한다. LLM이 GPU에서 실행돼도 proxy는 CPU로 계산할 수 있다. 같은 GPU의 VRAM이 부족하면 **점수 생성 중 서버를 멈추고 run 직전에 재시작**한다. 모델 다운로드를 포함한 cold 비용과 캐시가 준비된 비용도 구분한다.
+
+새 환경을 CI와 같은 의존성 버전으로 맞추려면 저장소 루트에서 `python -m pip install uv`, `uv export --locked --no-emit-project --no-hashes --all-extras -o /tmp/lotus-constraints.txt`, `uv pip install --python "$(command -v python)" -e . datasets --constraint /tmp/lotus-constraints.txt`를 사용한다. 기존 1·2번 환경을 유지할 때는 패키지를 임의로 업그레이드하지 않는다. 서버에 GGUF가 없다면 기존 배포처·revision·정확한 파일명을 확인해 같은 파일을 복원하고 SHA를 대조한다.
+
+#### B. 설정 고정·가중치와 서버 기록
+
+경로 두 개를 **서버의 실제 기존 파일 절대 경로**로 바꾼다. Context·슬롯·GPU offload도 1·2번과 맞춘다. 예시 GPU layers=0은 CPU 추론이다. GPU 서버에서는 기존 offload 값으로 바꾸며 3·4·5번 사이에 변경하지 않는다. 기존 추가 chat-template 등의 인자는 아래 `server_command`에 함께 넣는다.
+
+```bash
+export LLAMA_SERVER=/absolute/path/to/llama.cpp/build/bin/llama-server
+export MODEL_GGUF=/absolute/path/to/the_same_model_as_experiments_1_2.gguf
+test -x "$LLAMA_SERVER"
+test -f "$MODEL_GGUF"
 export REACTION_SET=liver
 export PROMPT=paper
 export LLM_MODEL=hosted_vllm/llama3.1-8b
 export LLM_API_BASE=http://127.0.0.1:8080/v1
 export LLM_BATCH=4
 export EARLY_WORKERS=4
-
-R=pruning_results/liver_paper
-mkdir -p "$R"
+export SERVER_PARALLEL=4
+export LLM_CONTEXT=32768
+export LLM_GPU_LAYERS=0
+export EMBED_DEVICE=cpu
+export N_ARTICLES=250
+export BENCHMARK_DIR="$(pwd)"
+export R="$(pwd)/pruning_results/${REACTION_SET}_${PROMPT}_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$(dirname "$R")"
+mkdir "$R"
+server_command=("$LLAMA_SERVER" --model "$MODEL_GGUF"
+  --alias "${LLM_MODEL#hosted_vllm/}" --host 127.0.0.1 --port 8080
+  --parallel "$SERVER_PARALLEL" --ctx-size "$LLM_CONTEXT" -ngl "$LLM_GPU_LAYERS")
+sha256sum "$MODEL_GGUF" "$LLAMA_SERVER" > "$R/server-files.sha256"
+{
+  cat "$R/server-files.sha256"
+  "$LLAMA_SERVER" --version
+  printf '%q ' "${server_command[@]}"
+  printf '\n'
+} > "$R/server-config.txt" 2>&1
+export LLM_SERVER_ID="$(sha256sum "$R/server-config.txt" | cut -d' ' -f1)"
+printf 'set -euo pipefail\n' > "$R/settings.sh"
+for name in R LLAMA_SERVER MODEL_GGUF REACTION_SET PROMPT LLM_MODEL LLM_API_BASE \
+            LLM_BATCH EARLY_WORKERS SERVER_PARALLEL LLM_CONTEXT LLM_GPU_LAYERS EMBED_DEVICE N_ARTICLES LLM_SERVER_ID BENCHMARK_DIR; do
+  printf 'export %s=%q\n' "$name" "${!name}"
+done >> "$R/settings.sh"
+declare -p server_command >> "$R/settings.sh"
+git rev-parse HEAD > "$R/code_commit.txt"
+python -m pip freeze > "$R/python_packages.txt"
+printf 'Study directory: %s\n' "$R"
+fresh() {
+  for path in "$@"; do
+    if [ -e "$path" ]; then
+      printf 'Existing output: %s. Reuse it or choose a new study directory.\n' "$path" >&2
+      return 1
+    fi
+  done
+}
 ```
 
-`PROMPT=adr`는 다른 판정 질문이므로 비교군 전체에서 통일한다. 혈액 패널은 `REACTION_SET=haematologic`과 별도 `R` 경로로 전 과정을 반복한다. `--device cuda`는 proxy 임베딩 장치이며 CPU에서는 `cpu`로 바꾼다.
+`R`은 비교 전체에서 한 번만 만든다. 새 터미널에서는 출력된 실제 절대 경로의 `settings.sh`를 source한다. 시각으로 `R`을 다시 만들면 별도 비교 폴더가 된다. API 키 등의 비밀 정보는 기록하지 않는다. `LLM_SERVER_ID`는 기록한 가중치·서버·명령의 식별자를 manifest에 남기며 변경 시 같은 출력 폴더의 재개를 막는다. **실제 서버 가중치를 자동 검증하는 기능은 아니므로 기록과 실제 실행 명령을 일치시켜야 한다.**
 
-### 11.1 Validation 보정: LLM 0회
+`EARLY_WORKERS`는 동시 논문 수다. 한 논문은 한 pair씩 평가하므로 여기서 실제 동시 요청 수를 정한다. `LLM_BATCH`는 한 번의 LM 호출 안의 상한이며 이번 실행기의 논문 병렬도를 늘리지 않는다. `SERVER_PARALLEL`은 서버 슬롯 수다. 세 값을 같은 의미로 해석하지 않는다.
+
+#### C. 별도 서버 터미널: 각 run 직전 같은 명령으로 시작
+
+별도 Bash 터미널에서 실제 `settings.sh` 경로를 사용한다. 3번 run 직전에 시작하고 종료 후 Ctrl+C로 서버를 멈춘다. 4번·5번도 같은 명령으로 재시작하고 같은 짧은 사전 점검을 실행하면 이전 run의 prompt KV cache를 넘기지 않는다. 각 run 내부의 자연스러운 prefix cache 재사용은 유지된다. 과거 1·2번과 시간 비교 시 당시 cache 절차도 구분한다.
 
 ```bash
-/usr/bin/time -f '%e' -o "$R/validation_biolord_wall_s.txt" \
-  python semijoin_pruning.py score --model biolord --split validation --device cuda \
-  --output "$R/validation_biolord.json" > "$R/validation_biolord.log" 2>&1
-
-python semijoin_pruning.py calibrate "$R/validation_biolord.json" \
-  --output "$R/thresholds.json"
+set -euo pipefail
+source /absolute/path/printed_above/settings.sh
+RUN=experiment3  # 다음은 experiment4, 그 다음은 experiment5_conservative
+sha256sum --check --status "$R/server-files.sha256"
+test "$(sha256sum "$R/server-config.txt" | cut -d' ' -f1)" = "$LLM_SERVER_ID"
+test ! -e "$R/${RUN}_server.log"
+"${server_command[@]}" 2>&1 | tee "$R/${RUN}_server.log"
 ```
 
-Validation 전체를 사용한다. Calibration 파일의 두 정책과 관측 보존율을 먼저 확인한다.
+서버 시작과 사전 점검마다 실제 GGUF·바이너리 파일의 SHA를 다시 확인한다. 같은 경로의 파일이 교체돼도 감지하며, 실패하면 이전 결과와 이어서 실행하지 않는다. 파일 검사는 실험 타이머 밖에서 수행한다.
 
-### 11.2 같은 test 논문의 두 proxy 점수
+Context는 **요청/슬롯당 실제 토큰 한도**를 시작 로그에서 확인한다. `--ctx-size 32768`과 4슬롯의 관계는 llama.cpp 버전·KV 설정에 따라 달라 일률적으로 8,192/slot이라고 가정하지 않는다. 본문 8,000**문자**에 프롬프트와 최대 256 출력 토큰까지 수용해야 하며 context 부족으로 본문을 생략하는 설정을 쓰지 않는다.
 
-아래는 기존 비교군과 맞춘 앞 250편 예시다. 전체 test를 사용하려면 **두 명령 모두** `--n-articles 250`을 생략한다.
+#### D. 실험 터미널: 실제 LOTUS 로컬 연결 사전 점검
+
+아래 함수를 한 번 정의한다. 각 run 전에 서버가 준비됐는지와 실제 LOTUS → LiteLLM → 로컬 서버 경로를 같은 짧은 요청으로 확인한다. 사전 점검 시간·호출은 본 실험 지표 밖에 둔다.
 
 ```bash
+preflight() {
+  local run_name="$1"
+  fresh "$R/${run_name}_preflight.log" "$R/${run_name}_models.json"
+  sha256sum --check --status "$R/server-files.sha256"
+  test "$(sha256sum "$R/server-config.txt" | cut -d' ' -f1)" = "$LLM_SERVER_ID"
+  curl --fail --silent --show-error --max-time 30 "${LLM_API_BASE%/v1}/health" > /dev/null
+  curl --fail --silent --show-error --max-time 30 "$LLM_API_BASE/models" > "$R/${run_name}_models.json"
+  python - "$R/${run_name}_models.json" <<'PY'
+import json, os, sys
+ids = [entry['id'] for entry in json.load(open(sys.argv[1]))['data']]
+expected = os.environ['LLM_MODEL'].split('/', 1)[1]
+assert expected in ids, (expected, ids)
+print('Server model alias:', expected)
+PY
+  python - <<'PY' > "$R/${run_name}_preflight.log" 2>&1
+import semijoin_baseline as baseline
+lm = baseline.configure(with_retriever=False)
+out = lm([[{'role': 'user', 'content': 'Reply with exactly True.'}]],
+         show_progress_bar=False, timeout=60, num_retries=0)
+text = out.outputs[0].strip()
+assert text and 'true' in text.lower(), repr(text)
+print('LOTUS local LLM route OK:', baseline.LLM_MODEL, repr(text))
+PY
+}
+declare -f fresh preflight >> "$R/settings.sh"
+```
+
+기본 로컬 경로는 외부 OpenAI API 키가 필요 없다. 위 서버 예시는 인증을 설정하지 않는다. 서버에 인증을 추가했다면 curl에도 해당 인증을 적용하고 LiteLLM의 `HOSTED_VLLM_API_KEY`를 설정하되 기록에는 남기지 않는다. 접속 오류·alias 불일치·빈 응답이 있으면 본 실험을 시작하지 않는다. LOTUS 응답 cache는 기본 False이며 서버의 prompt/KV cache와 별개다.
+
+### 11.1 실험 3: E5 점수 → 서버 점검 → 3번 실행
+
+사전 설정: 위 공통 환경, 같은 논문 수·패널·프롬프트, 새 출력, proxy 계산용 메모리를 확인한다. Score는 LLM 없이 실행된다.
+
+```bash
+fresh "$R/test_e5.json" "$R/test_e5_score_wall_s.txt" "$R/test_e5_score.log"
 /usr/bin/time -f '%e' -o "$R/test_e5_score_wall_s.txt" \
-  python semijoin_pruning.py score --model e5 --split test --n-articles 250 --device cuda \
-  --output "$R/test_e5.json" > "$R/test_e5_score.log" 2>&1
-
-/usr/bin/time -f '%e' -o "$R/test_biolord_score_wall_s.txt" \
-  python semijoin_pruning.py score --model biolord --split test --n-articles 250 --device cuda \
-  --output "$R/test_biolord.json" > "$R/test_biolord_score.log" 2>&1
+  python semijoin_pruning.py score --model e5 --split test --n-articles "$N_ARTICLES" \
+  --device "$EMBED_DEVICE" --output "$R/test_e5.json" > "$R/test_e5_score.log" 2>&1
 ```
 
-두 점수 파일의 `input_sha256`, `chunks_sha256`, `scorer.chunking`, `reactions`가 같아야 한다. 모델은 달라도 원본 논문·조각·tokenizer 정책·라벨은 동일하다는 확인이다. 전체 `scorer`의 모델과 접두어는 두 모델에서 다르므로 전체 객체가 같을 필요는 없다.
-
-### 11.3 실험 3·4: pruning 없이 실행
+서버 터미널을 `RUN=experiment3`으로 시작한 뒤 이어서 실행한다. **3번에는 threshold를 넣지 않는다.**
 
 ```bash
+preflight experiment3
+fresh "$R/experiment3" "$R/experiment3_wall_s.txt" "$R/experiment3.log"
 /usr/bin/time -f '%e' -o "$R/experiment3_wall_s.txt" \
   python semijoin_pruning.py run "$R/test_e5.json" --experiment 3 \
   --output-dir "$R/experiment3" > "$R/experiment3.log" 2>&1
+test -s "$R/experiment3/summary.json"
+test -s "$R/experiment3/articles.json"
+```
 
+완료되면 `experiment3/manifest.json`, `progress.jsonl`, `articles.json`, `summary.json`이 생성된다. 서버를 멈추고 4번 점수를 준비한다. **저장된 score를 다시 생성하지 않는다.** 중단됐다면 기존 score·timer를 보존하고 11.4 재개 절차를 쓴다.
+
+### 11.2 실험 4: BioLORD 점수·threshold 준비 → 4번 실행
+
+사전 설정: 3번 완료, 같은 논문 수·패널·프롬프트·LLM 설정을 확인한다. 서버는 임베딩 중 멈춰도 된다. Validation 전체로 두 threshold를 정하고 **4번 test의 LLM 결과를 보기 전에 고정**한다. Threshold 계산 자체는 4번 LLM 실행이 필요 없다.
+
+```bash
+test -s "$R/experiment3/summary.json"
+fresh "$R/test_biolord.json" "$R/test_biolord_score_wall_s.txt" "$R/test_biolord_score.log"
+/usr/bin/time -f '%e' -o "$R/test_biolord_score_wall_s.txt" \
+  python semijoin_pruning.py score --model biolord --split test --n-articles "$N_ARTICLES" \
+  --device "$EMBED_DEVICE" --output "$R/test_biolord.json" > "$R/test_biolord_score.log" 2>&1
+fresh "$R/validation_biolord.json" "$R/validation_biolord_wall_s.txt" "$R/validation_biolord.log"
+/usr/bin/time -f '%e' -o "$R/validation_biolord_wall_s.txt" \
+  python semijoin_pruning.py score --model biolord --split validation --device "$EMBED_DEVICE" \
+  --output "$R/validation_biolord.json" > "$R/validation_biolord.log" 2>&1
+fresh "$R/thresholds.json"
+python semijoin_pruning.py calibrate "$R/validation_biolord.json" --output "$R/thresholds.json"
+python - <<'PY'
+import json, os
+from pathlib import Path
+root = Path(os.environ['R'])
+read = lambda name: json.loads((root / name).read_text(encoding='utf-8'))
+e5, bio, validation, calibration = map(read, ['test_e5.json', 'test_biolord.json', 'validation_biolord.json', 'thresholds.json'])
+for key in ['input_sha256', 'chunks_sha256', 'reactions']:
+    assert e5[key] == bio[key], key
+assert e5['scorer']['chunking'] == bio['scorer']['chunking']
+assert bio['scorer'] == validation['scorer'] == calibration['scorer']
+assert bio['reactions'] == calibration['reactions']
+assert len(e5['articles']) == len(bio['articles']) == int(os.environ['N_ARTICLES'])
+print('Shared abstracts/chunks/panel and calibration OK')
+print(json.dumps(calibration['policies'], indent=2))
+PY
+```
+
+불일치하면 진행하지 않는다. Model·tokenizer 버전이 달라졌다면 새 비교 폴더에서 동일 조건으로 다시 준비한다. 기존 score를 덮어써서 맞추지 않는다. 이제 서버 터미널을 같은 명령의 `RUN=experiment4`로 다시 시작한다. **4번에도 threshold를 넣지 않는다.**
+
+```bash
+preflight experiment4
+fresh "$R/experiment4" "$R/experiment4_wall_s.txt" "$R/experiment4.log"
 /usr/bin/time -f '%e' -o "$R/experiment4_wall_s.txt" \
   python semijoin_pruning.py run "$R/test_biolord.json" --experiment 4 \
   --output-dir "$R/experiment4" > "$R/experiment4.log" 2>&1
+test -s "$R/experiment4/summary.json"
+test -s "$R/experiment4/articles.json"
 ```
 
-3·4번에는 threshold나 calibration을 전달하지 않는다. 3번은 E5 점수, 4번은 BioLORD 점수여야 한다.
+저장 파일 구성은 3번과 같다. 4번 결과와 BioLORD score를 그대로 5번에 쓴다. 전체 test를 쓰려면 두 test score 명령 모두 `--n-articles`를 생략하고 위 건수 assert도 실제 전체 건수로 맞춘다.
 
-### 11.4 실험 5의 두 정책: 우선 replay로 비교
+### 11.3 실험 5: 두 정책 replay → 보수적 조건 1회 실측
 
-완료된 4번을 재사용한다. 두 명령 모두 추가 LLM 호출이 없다.
+사전 설정: 4번 완료, validation threshold 고정, **4번과 같은 BioLORD test score**, 같은 LLM 설정을 확인한다. 먼저 저장된 4번 판정으로 두 정책을 replay한다. 서버가 정지 중이어도 되며 새 LLM 호출은 없다.
 
 ```bash
+test -s "$R/experiment4/summary.json"
+fresh "$R/experiment5_conservative_replay.json" "$R/experiment5_retain95_replay.json"
 python semijoin_pruning.py replay "$R/test_biolord.json" \
   --calibration "$R/thresholds.json" --policy conservative \
   --source-dir "$R/experiment4" --output "$R/experiment5_conservative_replay.json"
-
 python semijoin_pruning.py replay "$R/test_biolord.json" \
   --calibration "$R/thresholds.json" --policy retain_95 \
   --source-dir "$R/experiment4" --output "$R/experiment5_retain95_replay.json"
 ```
 
-### 11.5 선택한 5번 정책: 실제 시간 한 번 측정
-
-보수적 정책을 주 결과로 삼는 예시다. 95% 정책을 실측하려면 정책과 출력 폴더·시간 파일 이름을 함께 바꾼다.
+주 조건은 사전에 정한 `conservative`이며 test 결과를 보고 바꾸지 않는다. 서버를 같은 명령의 `RUN=experiment5_conservative`로 다시 시작하고 실제 시간을 잰다.
 
 ```bash
+preflight experiment5_conservative
+fresh "$R/experiment5_conservative" "$R/experiment5_conservative_wall_s.txt" "$R/experiment5_conservative.log"
 /usr/bin/time -f '%e' -o "$R/experiment5_conservative_wall_s.txt" \
   python semijoin_pruning.py run "$R/test_biolord.json" --experiment 5 \
   --calibration "$R/thresholds.json" --policy conservative \
   --output-dir "$R/experiment5_conservative" > "$R/experiment5_conservative.log" 2>&1
+test -s "$R/experiment5_conservative/summary.json"
+test -s "$R/experiment5_conservative/articles.json"
 ```
 
-동일 폴더 재호출은 저장 결과를 반환하거나 미완료 논문만 재개한다. 이 짧은 재호출로 최초 시간 파일을 덮어쓰지 않는다. 다시 시간을 잴 때는 새 출력·시간 파일을 사용한다.
+전부 prune되면 `progress.jsonl`이 없어도 정상이다. `retain_95`를 replay만 했다면 실제 시간은 미측정으로 표시한다. 이 조건도 실측하려면 policy·폴더·timer·log 이름을 모두 분리하고 같은 서버 초기화·사전 점검을 적용한다.
 
-## 12. 결과 읽기
+### 11.4 중단 시 재개
+
+같은 설정·score·출력 폴더로 실행하면 미완료 논문만 재개한다. **score 생성이나 원래 timer를 다시 실행하지 않는다.** 아래는 3번 예시다. 사전 점검도 새 이름으로 실행하고 재개 log·timer에 새 번호를 쓴다.
+
+새 실험 터미널에서는 원래 Python 환경을 활성화하고 `source /실제/기존/R/settings.sh` 후 `cd "$BENCHMARK_DIR"`를 실행한다. 위 D단계는 `fresh`·`preflight` 함수도 settings 파일에 보존하므로 재접속 후 사용할 수 있다. 서버도 끊겼다면 서버 터미널의 `RUN=experiment3_resume1`처럼 새 로그 이름으로 같은 명령을 다시 시작한다.
+
+```bash
+preflight experiment3_resume1
+fresh "$R/experiment3_resume1_wall_s.txt" "$R/experiment3_resume1.log"
+/usr/bin/time -f '%e' -o "$R/experiment3_resume1_wall_s.txt" \
+  python semijoin_pruning.py run "$R/test_e5.json" --experiment 3 \
+  --output-dir "$R/experiment3" > "$R/experiment3_resume1.log" 2>&1
+```
+
+4번은 원래 점수와 번호를, 5번은 원래 calibration·policy까지 그대로 사용한다. 재개 시간은 남은 작업 시간이며 전체 시간이 아니다. 첫 미완료 논문에서 잃은 pair 호출도 있어 단순 합산을 무중단 실험과 같다고 보고하지 않는다. 완료 폴더 재호출은 저장 결과를 짧게 반환하므로 원래 timer를 덮어쓰지 않는다. 시간 본 결과가 필요하면 새 출력 폴더에서 무중단 실측한다. 새 코드의 manifest/summary 식별 필드가 없는 옛 실행을 수동 편집해 재사용하지 않는다. 유효한 기존 score는 보존하고 새 실행 폴더를 사용한다.
+
+혈액 패널은 `REACTION_SET=haematologic`과 새로운 `R`에서 동일하게 3→4→5를 반복한다. Liver의 score·calibration·실행 폴더를 섞지 않는다.
+
+## 12. 결과 읽기와 설정 비교
+
+위에서 사용한 같은 `R`을 읽는다. 재개 실행은 전체 시간을 표시하지 않고, 완료 재호출로 timer가 짧게 덮인 정황도 검사한다. `fresh` 사전 검사와 함께 사용한다.
 
 ```bash
 python - <<'PY'
-import json
+import json, os
 from pathlib import Path
-
-root = Path('pruning_results/liver_paper')
-for name, score_time in [
-    ('experiment3', 'test_e5_score_wall_s.txt'),
-    ('experiment4', 'test_biolord_score_wall_s.txt'),
-    ('experiment5_conservative', 'test_biolord_score_wall_s.txt'),
-]:
-    summary = json.loads((root / name / 'summary.json').read_text(encoding='utf-8'))
-    rows = json.loads((root / name / 'articles.json').read_text(encoding='utf-8'))
+root = Path(os.environ['R'])
+read = lambda path: json.loads(path.read_text(encoding='utf-8'))
+names = ['experiment3', 'experiment4', 'experiment5_conservative']
+ms = [read(root / name / 'manifest.json') for name in names]
+for key in ['model', 'instruction', 'max_tokens', 'temperature', 'workers', 'llm_batch', 'endpoint_sha256', 'llm_server_id']:
+    assert len({json.dumps(m[key], sort_keys=True) for m in ms}) == 1, key
+assert ms[1]['scores_sha256'] == ms[2]['scores_sha256']
+for name, score_time in zip(names, ['test_e5_score_wall_s.txt', 'test_biolord_score_wall_s.txt', 'test_biolord_score_wall_s.txt']):
+    summary = read(root / name / 'summary.json')
+    rows = read(root / name / 'articles.json')
     ranks = [r['first_gold_witness_rank'] for r in rows if r['gold_positive']]
+    print(name, 'calls', summary['lm_calls'], 'F1', summary['f1'], 'recall', summary['recall'])
+    print('mean first gold witness rank', sum(ranks) / len(ranks) if ranks else None)
+    if summary['resumed']:
+        print('test score + run wall: unavailable (resumed run)')
+        continue
     score_wall = float((root / score_time).read_text().strip())
     run_wall = float((root / f'{name}_wall_s.txt').read_text().strip())
-    print(name, 'calls', summary['lm_calls'], 'F1', summary['f1'])
-    print('mean first gold witness rank', sum(ranks) / len(ranks) if ranks else None)
+    assert run_wall + 0.1 >= summary['invocation_time_s'], 'Wall timer may have been overwritten by a completed rerun'
     print('test score + run wall seconds', score_wall + run_wall)
 PY
 ```
 
-합계는 test 점수 생성과 live run을 별도로 실측한 시간의 합이며 단일 프로세스의 end-to-end 측정은 아니다. Validation 준비 시간은 별도로 기록한다. 4·5번이 점수 파일을 공유하더라도 각 방법의 전체 비용을 비교할 때는 각각 BioLORD 점수 생성 비용을 포함한다. 모델 다운로드·캐시·장치·병렬도 조건도 맞춘다.
+합계는 test score 생성과 live run을 별도로 측정한 시간의 합이며 단일 프로세스 end-to-end 실측은 아니다. Validation 준비 시간은 별도다. 4·5번이 score를 공유하더라도 각 방법의 비용에는 각각 BioLORD score 생성 비용을 포함한다. 3·4번 gold 순위는 같은 정답 양성 ID 전체로 비교하고, 5번의 순서가 4번보다 좋아졌다는 근거로 쓰지 않는다.
 
-## 13. 자동 검증과 서버 실험의 구분
+`server-config.txt`·GGUF SHA·바이너리 버전·실제 명령·각 run 시작 로그까지 함께 확인한다. Live 결과 차이는 4번의 동일 판정을 쓰는 replay와 분리해 LLM 응답 변동도 검토한다.
 
-자동 테스트는 공통 조각의 길이와 전체 abstract 보존, E5 prefix, max 집계, 무효 점수의 안전한 처리, threshold 경계, 원래 ID·평가 순서, 재개·replay 정합성, 기존 LOTUS pair 판정 경로를 확인한다. 실제 BioDEX 품질·GPU 실행시간·모델별 효과는 서버 실험에서 측정한다.
+## 13. 자동 검증과 서버 실험
+
+자동 테스트는 chunk 길이·전체 abstract 보존·E5 prefix·max 집계·무효 점수·threshold 경계·원래 ID·평가 순서·재개·replay·기존 LOTUS 판정 경로를 확인한다. 실제 BioDEX 품질·GPU 시간·모델 효과는 서버에서 측정한다. 이 테스트가 모델 다운로드나 실제 GPU 추론을 대신하지는 않는다.
+
+로컬 경로와 설정의 근거는 [LiteLLM OpenAI 호환 vLLM 경로](https://docs.litellm.ai/docs/providers/vllm), [llama.cpp server 공식 설명](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)이다. 새 설치·다운로드가 필요해도 기존 1·2번의 모델 배포처·revision·파일을 먼저 확인해 같은 가중치를 가져오며 다른 8B 모델로 암묵적으로 바꾸지 않는다.

@@ -127,6 +127,8 @@ def abstract_chunks(text: str, tokenizers: dict) -> list[str]:
 
 
 def make_scores(args) -> None:
+    if args.output.exists():
+        raise ValueError("Score output already exists; reuse it or choose a new path.")
     import semijoin_baseline as baseline
     from transformers import AutoTokenizer
 
@@ -440,6 +442,7 @@ def run_locked(args) -> None:
         "threshold": threshold,
         "threshold_source": threshold_source,
         "model": model_config["model"],
+        "llm_server_id": os.environ.get("LLM_SERVER_ID"),
         "instruction": baseline.JOIN_INSTRUCTION,
         "max_tokens": model_config["max_tokens"],
         "temperature": model_config["temperature"],
@@ -472,7 +475,8 @@ def run_locked(args) -> None:
         records = apply_gate(scores, previous, threshold)
         summary = read_json(summary_path)
         if (
-            summary.get("experiment") != manifest["experiment"]
+            summary.get("manifest_sha256") != digest(manifest)
+            or summary.get("experiment") != manifest["experiment"]
             or summary.get("threshold") != threshold
             or any(summary.get(key) != value for key, value in summarize(records).items())
         ):
@@ -494,6 +498,7 @@ def run_locked(args) -> None:
     summary = summarize(records)
     summary.update(
         {
+            "manifest_sha256": digest(manifest),
             "experiment": manifest["experiment"],
             "threshold": threshold,
             "embedding_time_s": scores["embedding_time_s"],
@@ -531,6 +536,7 @@ def replay(args) -> None:
     source_summary = read_json(args.source_dir / "summary.json")
     if (
         read_json(args.source_dir / "articles.json") != source
+        or source_summary.get("manifest_sha256") != digest(manifest)
         or source_summary.get("experiment") != manifest["experiment"]
         or source_summary.get("threshold") != source_threshold
         or any(source_summary.get(key) != value for key, value in summarize(source).items())
