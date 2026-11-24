@@ -1,0 +1,94 @@
+{
+  "dataset": "BioDEX/BioDEX-Reactions",
+  "dataset_revision": "01a5dacdabd144a120af04931a11a99febd48432",
+  "filename": "data/test-00000-of-00001-2449439e9130546c.parquet",
+  "parquet_sha256": "7ea93550ba12993ad87d47d0afd665574d42ec14218bca1bfdba13fe3d4ff749",
+  "truncation_limit_characters": 8000,
+  "llm_input": "fulltext_processed[:TRUNCATION_LIMIT]",
+  "method": "bool(abstract.strip()) and abstract in fulltext_processed[:TRUNCATION_LIMIT]",
+  "reaction_panels": {
+    "liver": [
+      "Drug-induced liver injury",
+      "Hepatic function abnormal",
+      "Hepatotoxicity",
+      "Liver injury",
+      "Hepatic failure",
+      "Hepatic enzyme increased",
+      "Acute hepatic failure",
+      "Hepatitis",
+      "Immune-mediated hepatitis",
+      "Hepatic necrosis"
+    ],
+    "haematologic": [
+      "Neutropenia",
+      "Febrile neutropenia",
+      "Anaemia",
+      "Pancytopenia",
+      "Leukopenia",
+      "Thrombocytopenia",
+      "Haemolytic anaemia",
+      "Heparin-induced thrombocytopenia",
+      "Aplastic anaemia",
+      "Normocytic anaemia"
+    ]
+  },
+  "per_article_csv_sha256": "50c36548f2d2b5a343deb5b597423b01f823e8ae35a90b11efcb04905a07b940",
+  "first_250": {
+    "n_articles": 250,
+    "n_empty_abstract": 0,
+    "n_empty_fulltext": 0,
+    "n_abstract_over_limit": 0,
+    "exact_prefix": 250,
+    "exact_full": 250,
+    "n_not_contained": 0,
+    "n_full_but_not_prefix": 0,
+    "max_abstract_characters": 3528,
+    "min_abstract_start": 49,
+    "max_abstract_start": 243,
+    "max_abstract_end_exclusive": 3666
+  },
+  "all_test": {
+    "n_articles": 4249,
+    "n_empty_abstract": 0,
+    "n_empty_fulltext": 0,
+    "n_abstract_over_limit": 0,
+    "exact_prefix": 4249,
+    "exact_full": 4249,
+    "n_not_contained": 0,
+    "n_full_but_not_prefix": 0,
+    "max_abstract_characters": 4168,
+    "min_abstract_start": 40,
+    "max_abstract_start": 313,
+    "max_abstract_end_exclusive": 4339
+  },
+  "panels_first_250": {
+    "liver": {
+      "n_articles": 10,
+      "n_empty_abstract": 0,
+      "n_empty_fulltext": 0,
+      "n_abstract_over_limit": 0,
+      "exact_prefix": 10,
+      "exact_full": 10,
+      "n_not_contained": 0,
+      "n_full_but_not_prefix": 0,
+      "max_abstract_characters": 2542,
+      "min_abstract_start": 82,
+      "max_abstract_start": 215,
+      "max_abstract_end_exclusive": 2693
+    },
+    "haematologic": {
+      "n_articles": 32,
+      "n_empty_abstract": 0,
+      "n_empty_fulltext": 0,
+      "n_abstract_over_limit": 0,
+      "exact_prefix": 32,
+      "exact_full": 32,
+      "n_not_contained": 0,
+      "n_full_but_not_prefix": 0,
+      "max_abstract_characters": 2995,
+      "min_abstract_start": 63,
+      "max_abstract_start": 235,
+      "max_abstract_end_exclusive": 3230
+    }
+  }
+}
