@@ -1,6 +1,7 @@
 """Abstract-chunk E5/BioLORD ordering and BioLORD pruning with the existing early-stop executor."""
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -8,6 +9,7 @@ import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -590,6 +592,31 @@ def run_locked(args) -> None:
     print(json.dumps(summary, indent=2))
 
 
+def completed_run(scores: dict, directory: Path) -> tuple[dict, list[dict], dict]:
+    """Read a completed live run without repairing or modifying its artifacts."""
+    manifest = read_json(directory / "manifest.json")
+    if manifest["scores_sha256"] != digest(scores):
+        raise ValueError("Replay requires exactly the same scores as the source run.")
+    source_threshold = manifest["threshold"]
+    source_progress = read_progress(directory / "progress.jsonl", repair=False)
+    expected_ids = {row["_qid"] for row in scores["articles"] if keep_article(row["scores"], source_threshold)}
+    if {row["_qid"] for row in source_progress} != expected_ids or any(
+        row.get("pruned", False) for row in source_progress
+    ):
+        raise ValueError("Replay requires the completed source run's evaluated progress.")
+    source = apply_gate(scores, source_progress, source_threshold)
+    source_summary = read_json(directory / "summary.json")
+    if (
+        read_json(directory / "articles.json") != source
+        or source_summary.get("manifest_sha256") != digest(manifest)
+        or source_summary.get("experiment") != manifest["experiment"]
+        or source_summary.get("threshold") != source_threshold
+        or any(source_summary.get(key) != value for key, value in summarize(source).items())
+    ):
+        raise ValueError("Source results disagree with their original threshold or completed progress.")
+    return manifest, source, source_summary
+
+
 def replay(args) -> None:
     inputs = [
         args.scores,
@@ -599,26 +626,7 @@ def replay(args) -> None:
         inputs.append(args.calibration)
     distinct_output(args.output, inputs)
     scores = load_scores(args.scores)
-    manifest = read_json(args.source_dir / "manifest.json")
-    if manifest["scores_sha256"] != digest(scores):
-        raise ValueError("Replay requires exactly the same scores as the source run.")
-    source_threshold = manifest["threshold"]
-    source_progress = read_progress(args.source_dir / "progress.jsonl", repair=False)
-    expected_ids = {row["_qid"] for row in scores["articles"] if keep_article(row["scores"], source_threshold)}
-    if {row["_qid"] for row in source_progress} != expected_ids or any(
-        row.get("pruned", False) for row in source_progress
-    ):
-        raise ValueError("Replay requires the completed source run's evaluated progress.")
-    source = apply_gate(scores, source_progress, source_threshold)
-    source_summary = read_json(args.source_dir / "summary.json")
-    if (
-        read_json(args.source_dir / "articles.json") != source
-        or source_summary.get("manifest_sha256") != digest(manifest)
-        or source_summary.get("experiment") != manifest["experiment"]
-        or source_summary.get("threshold") != source_threshold
-        or any(source_summary.get(key) != value for key, value in summarize(source).items())
-    ):
-        raise ValueError("Source results disagree with their original threshold or completed progress.")
+    manifest, source, _ = completed_run(scores, args.source_dir)
     threshold, threshold_source = threshold_from_args(args, scores)
     records = apply_gate(scores, source, threshold)
     summary = summarize(records)
@@ -634,6 +642,179 @@ def replay(args) -> None:
     )
     save_json(args.output, {"source_manifest": manifest, "summary": summary, "articles": records})
     print(json.dumps(summary, indent=2))
+
+
+def comparison_prf(pred: set[int], reference: set[int]) -> dict:
+    import semijoin_baseline as baseline
+
+    tp = len(pred & reference)
+    return {
+        **baseline.prf(pred, reference),
+        "tp": tp,
+        "fp": len(pred - reference),
+        "fn": len(reference - pred),
+    }
+
+
+def report(args) -> None:
+    """Standardize saved results after evaluation; never call the LLM or load the dataset."""
+    import semijoin_baseline as baseline
+
+    inputs = [args.scores, *args.baseline_summary, *args.replay]
+    if args.output.exists():
+        raise ValueError("Report output already exists; choose a new path.")
+    reference = load_scores(args.scores)
+    if reference["split"] != "test":
+        raise ValueError("Report requires test scores as the gold reference.")
+    universe = {row["_qid"] for row in reference["articles"]}
+    gold = {row["_qid"] for row in reference["articles"] if row["gold_matches"]}
+
+    def cohort(scores):
+        return (
+            scores["split"], scores["input_sha256"], scores["chunks_sha256"],
+            scores["reactions"], scores["scorer"]["chunking"],
+            [(row["_qid"], row["gold_matches"]) for row in scores["articles"]],
+        )
+
+    def selected(records):
+        return {row["_qid"] for row in records if row["matched"] is not None}
+
+    # Each run is paired with its original score file; E5 and BioLORD hashes differ.
+    live = []
+    for score_path, directory in args.runs:
+        inputs.extend([score_path, *(directory / name for name in
+                                    ("manifest.json", "progress.jsonl", "articles.json", "summary.json"))])
+        scores = load_scores(score_path)
+        if cohort(scores) != cohort(reference):
+            raise ValueError("Report score files have different articles, gold labels, reactions, or chunks.")
+        manifest, records, summary = completed_run(scores, directory)
+        threshold_from_args(SimpleNamespace(experiment=manifest["experiment"], threshold=manifest["threshold"],
+                                            calibration=None), scores)
+        live.append((manifest, records, summary, directory, scores))
+    keys = ("model", "instruction", "temperature", "max_tokens", "workers", "llm_batch",
+            "endpoint_sha256", "llm_server_id")
+    if live and any(any(m.get(key) != live[0][0].get(key) for key in keys) for m, *_ in live):
+        raise ValueError("Live runs use different LLM, prompt, server, or execution settings.")
+    if len({m["scores_sha256"] for m, *_ in live if m["experiment"] in (4, 5)}) > 1:
+        raise ValueError("Experiments 4 and 5 must reuse exactly the same BioLORD score file.")
+    summaries = [read_json(path) for path in args.baseline_summary]
+
+    def recorded_value(key, values):
+        found = [value[key] for value in values if key in value]
+        if found and any(value != found[0] for value in found):
+            raise ValueError(f"Historical summaries disagree on {key}.")
+        return found[0] if found else None
+
+    if live:
+        model = live[0][0]["model"]
+        prompts = {baseline.PAPER_JOIN_INSTRUCTION: "paper", baseline.ADR_JOIN_INSTRUCTION: "adr"}
+        if live[0][0]["instruction"] not in prompts:
+            raise ValueError("The saved prompt is not a supported baseline instruction.")
+        prompt = prompts[live[0][0]["instruction"]]
+    else:
+        model = recorded_value("model", [run for item in summaries for name, run in item["runs"].items()
+                                          if name in ("join_full", "early_stop")])
+        prompt = recorded_value("prompt", summaries)
+    panel = next((name for name, labels in baseline.REACTION_SETS.items() if labels == reference["reactions"]), None)
+    if panel is None:
+        raise ValueError("The reference reaction panel is not a baseline panel.")
+    context = SimpleNamespace(REACTION_SET=panel, PROMPT=prompt, lm_config=lambda: {"model": model})
+    comparison = compare_baselines(reference, args.baseline_summary, context)
+    summary_hashes = {digest(item) for item in summaries}
+    for manifest, *_ in live:
+        bound = manifest.get("baseline_comparison")
+        if bound and not summary_hashes.issubset({item["summary_sha256"] for item in bound["sources"]}):
+            raise ValueError("Historical summaries differ from the live run's recorded baseline references.")
+
+    historic = {}
+
+    def check_saved_metrics(saved, pred, reference_ids, source):
+        if type(saved.get("n_pred")) is not int or saved["n_pred"] != len(pred):
+            raise ValueError(f"{source}: selected IDs disagree with saved n_pred.")
+        # Validate against the original writer's floating-point formula before normalizing it.
+        expected = baseline.prf(pred, reference_ids)
+        for key in ("precision", "recall", "f1"):
+            if key in saved and (type(saved[key]) not in (int, float) or saved[key] != expected[key]):
+                raise ValueError(f"{source}: selected IDs disagree with saved {key}.")
+
+    for path, source in zip(args.baseline_summary, summaries):
+        for method, experiment in (("join_full", 1), ("early_stop", 2)):
+            if method not in source["runs"]:
+                continue
+            summary = source["runs"][method]
+            csv_path = path.parent / f"{method}_semi.csv"
+            if method == "join_full" and not csv_path.exists():
+                csv_path = path.parent / "join_full_join.csv"
+            inputs.append(csv_path)
+            with csv_path.open(encoding="utf-8-sig", newline="") as stream:
+                reader = csv.DictReader(stream)
+                if "_qid" not in (reader.fieldnames or []):
+                    raise ValueError(f"{csv_path}: missing _qid column.")
+                pred = {int(row["_qid"]) for row in reader}
+            if not pred.issubset(universe):
+                raise ValueError(f"{csv_path}: selected article IDs are outside the reference cohort.")
+            check_saved_metrics(summary.get("vs_labels", {}), pred, gold, csv_path)
+            value = (digest(source), pred, summary, path)
+            if experiment in historic and historic[experiment][:3] != value[:3]:
+                raise ValueError(f"Conflicting experiment {experiment} results were supplied.")
+            historic[experiment] = value
+    full = historic[1][1] if 1 in historic else None
+    if full is not None and 2 in historic and "vs_join_full" in historic[2][2]:
+        check_saved_metrics(historic[2][2]["vs_join_full"], historic[2][1], full, historic[2][3])
+    results = []
+
+    def add_result(experiment, mode, pred, summary, source, threshold=None, threshold_source=None):
+        calls = summary.get("lm_calls")
+        if calls is not None and (type(calls) is not int or calls < 0):
+            raise ValueError("LLM calls must be a nonnegative integer or absent.")
+        results.append({
+            "experiment": experiment, "mode": mode, "source": str(source.resolve()), "threshold": threshold,
+            "threshold_source": threshold_source,
+            "n_articles": len(universe), "n_positive": len(gold), "n_selected": len(pred),
+            "lm_calls": calls, "lm_calls_kind": "replayed_logical_pair_evaluations" if mode == "replay"
+            else "logical_pair_evaluations",
+            "vs_labels": comparison_prf(pred, gold),
+            "vs_join_full": comparison_prf(pred, full) if full is not None else None,
+        })
+
+    for experiment, (_, pred, summary, path) in sorted(historic.items()):
+        add_result(experiment, "live", pred, summary, path)
+    for manifest, records, summary, directory, _ in live:
+        add_result(manifest["experiment"], "live", selected(records), summary, directory, manifest["threshold"],
+                   manifest.get("threshold_source"))
+    for path in args.replay:
+        saved = read_json(path)
+        sources = [item for item in live if item[0] == saved["source_manifest"]]
+        if not sources:
+            raise ValueError("Replay report requires its verified source live run via --run.")
+        if any(item[1] != sources[0][1] for item in sources):
+            raise ValueError("Replay source is ambiguous; supply only its original live run.")
+        manifest, records, _, _, scores = sources[0]
+        summary = saved["summary"]
+        threshold_from_args(SimpleNamespace(experiment=5, threshold=summary["threshold"], calibration=None), scores)
+        replayed = apply_gate(scores, records, summary["threshold"])
+        if (saved["articles"] != replayed or summary.get("experiment") != 5 or summary.get("replay") is not True
+                or summary.get("lm_calls_kind") != "replayed_logical_pair_evaluations"
+                or any(summary.get(key) != value for key, value in summarize(replayed).items())):
+            raise ValueError("Replay results disagree with their verified source decisions.")
+        add_result(5, "replay", selected(replayed), summary, path, summary["threshold"], summary.get("threshold_source"))
+    if not results:
+        raise ValueError("Supply at least one baseline summary or completed --run.")
+    distinct_output(args.output, inputs)
+    save_json(args.output, {
+        "reference_scores_sha256": digest(reference),
+        "results": results,
+        "missing_experiments": sorted(set(range(1, 6)) - {row["experiment"] for row in results}),
+        "baseline_comparison": comparison,
+        "notes": [
+            "All precision/recall/F1 values are recomputed from article ID sets and rounded once to four decimals.",
+            "vs_join_full is null when experiment 1 is not supplied; an empty supplied full result is not missing.",
+            "Historical row IDs/counts do not prove identical source articles, prompts, weights, or server state.",
+            "Timing is not standardized by this report; retain original scope-labelled timing artifacts.",
+            "Replay LLM counts are simulated policy costs; aggregation and replay make no additional LLM calls.",
+        ],
+    })
+    print(json.dumps(read_json(args.output), indent=2))
 
 
 def main() -> None:
@@ -655,6 +836,13 @@ def main() -> None:
     comparison.add_argument("--baseline-summary", type=Path, action="append", required=True)
     comparison.add_argument("--output", type=Path, required=True)
     comparison.set_defaults(action=check_baselines)
+    reporting = commands.add_parser("report", help="Recompute common experiment 1-5 metrics from saved artifacts; no LLM calls.")
+    reporting.add_argument("--scores", type=Path, required=True)
+    reporting.add_argument("--baseline-summary", type=Path, action="append", default=[])
+    reporting.add_argument("--run", dest="runs", type=Path, nargs=2, action="append", default=[], metavar=("SCORES", "DIR"))
+    reporting.add_argument("--replay", type=Path, action="append", default=[])
+    reporting.add_argument("--output", type=Path, required=True)
+    reporting.set_defaults(action=report)
     for name, action in [("run", run), ("replay", replay)]:
         command = commands.add_parser(name)
         command.add_argument("scores", type=Path)

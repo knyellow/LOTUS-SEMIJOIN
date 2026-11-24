@@ -78,6 +78,177 @@ class TestSemijoinPruning(unittest.TestCase):
             },
         }
 
+    def report_fixture(self, root):
+        baseline = load_baseline()
+        baseline.REACTION_SET, baseline.REACTION_SETS = "test", {"test": ["A", "B"]}
+        articles = pd.DataFrame([
+            {"_qid": 0, "patient_description": "first", "reactions_list": ["B"]},
+            {"_qid": 1, "patient_description": "second", "reactions_list": ["A"]},
+            {"_qid": 2, "patient_description": "third", "reactions_list": []},
+        ])
+        baseline.load_articles = Mock(return_value=articles)
+        baseline.configure = Mock(return_value=object())
+
+        def pair(*args, **kwargs):
+            qid, label = args[2][0], args[3][0]
+            return SimpleNamespace(join_results=[(qid, label, None)] if (qid, label) in {(0, 1), (2, 0)} else [])
+
+        baseline.pairwise_join = Mock(side_effect=pair)
+        runs = []
+        with patch.dict(sys.modules, {"semijoin_baseline": baseline}), contextlib.redirect_stdout(io.StringIO()):
+            for experiment in (3, 4, 5):
+                scores = json.loads(json.dumps(self.scores))
+                scores["input_sha256"] = pruning.article_digest(articles)
+                scores["chunks_sha256"] = pruning.digest(["first", "second", "third"])
+                scores["scorer"]["chunking"] = {"version": 1, "token_budget": 128, "overlap": 0}
+                scores["articles"].append({"_qid": 2, "scores": [0.6, 0.1], "gold_matches": []})
+                if experiment == 3:
+                    scores["scorer"]["model"] = pruning.MODELS["e5"]
+                    scores["articles"][0]["scores"] = [0.9, 0.1]
+                score_path = root / ("e5.json" if experiment == 3 else "bio.json")
+                if not score_path.exists():
+                    pruning.save_json(score_path, scores)
+                directory = root / f"run{experiment}"
+                pruning.run(SimpleNamespace(scores=score_path, output_dir=directory, experiment=experiment,
+                                            threshold=0.7 if experiment == 5 else None, calibration=None))
+                runs.append((score_path, directory))
+        legacy = root / "legacy"
+        legacy.mkdir()
+        summary = self.baseline_summary(baseline)
+        for method, value in summary["runs"].items():
+            value.update(n_articles=3, lm_calls=6 if method == "join_full" else 4,
+                         vs_labels=baseline.prf({0, 2}, {0, 1}))
+            (legacy / f"{method}_semi.csv").write_text("_qid,title\n0,first\n2,third\n", encoding="utf-8")
+        pruning.save_json(legacy / "summary.json", summary)
+        args = SimpleNamespace(scores=root / "bio.json", runs=runs, replay=[],
+                               baseline_summary=[legacy / "summary.json"], output=root / "comparison.json")
+        baseline.configure.reset_mock()
+        baseline.load_articles.reset_mock()
+        baseline.pairwise_join.reset_mock()
+        return baseline, args
+
+    def test_report_unifies_all_five_and_replay_without_lm_or_dataset(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            baseline, args = self.report_fixture(root)
+            args.replay = [root / "replay.json"]
+            with patch.dict(sys.modules, {"semijoin_baseline": baseline}):
+                pruning.replay(SimpleNamespace(scores=args.scores, source_dir=root / "run4", threshold=0.7,
+                                               calibration=None, output=args.replay[0]))
+                before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+                # Workstation environment defaults must not replace stored experiment conditions.
+                baseline.LLM_MODEL, baseline.PROMPT = "other-current-model", "other-current-prompt"
+                pruning.report(args)
+            result = pruning.read_json(args.output)
+            rows = result["results"]
+            self.assertEqual([row["experiment"] for row in rows], [1, 2, 3, 4, 5, 5])
+            self.assertEqual(result["missing_experiments"], [])
+            self.assertTrue(all(set(row) == set(rows[0]) for row in rows))
+            self.assertEqual([row["lm_calls"] for row in rows], [6, 4, 5, 4, 1, 1])
+            self.assertEqual([row["n_selected"] for row in rows], [2, 2, 2, 2, 1, 1])
+            self.assertEqual(rows[0]["vs_labels"]["f1"], 0.5)
+            self.assertEqual(rows[4]["vs_labels"], dict(tp=1, fp=0, fn=1, n_pred=1,
+                                                      precision=1.0, recall=0.5, f1=0.6667))
+            self.assertEqual(rows[3]["vs_join_full"]["f1"], 1.0)
+            self.assertEqual(rows[4]["vs_join_full"]["recall"], 0.5)
+            self.assertEqual(rows[5]["lm_calls_kind"], "replayed_logical_pair_evaluations")
+            self.assertEqual(result["reference_scores_sha256"], pruning.digest(pruning.read_json(args.scores)))
+            self.assertTrue(all(path.read_bytes() == data for path, data in before.items()))
+            baseline.configure.assert_not_called()
+            baseline.load_articles.assert_not_called()
+            baseline.pairwise_join.assert_not_called()
+
+    def test_report_missing_full_is_null_but_valid_empty_full_is_measured(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            baseline, args = self.report_fixture(root)
+            summary_path = args.baseline_summary[0]
+            summary = pruning.read_json(summary_path)
+            full = summary["runs"].pop("join_full")
+            pruning.save_json(summary_path, summary)
+            with patch.dict(sys.modules, {"semijoin_baseline": baseline}):
+                pruning.report(args)
+                result = pruning.read_json(args.output)
+                self.assertEqual(result["missing_experiments"], [1])
+                self.assertTrue(all(row["vs_join_full"] is None for row in result["results"]))
+                args.output = root / "empty-full-report.json"
+                full["vs_labels"] = baseline.prf(set(), {0, 1})
+                summary["runs"] = {"join_full": full}
+                pruning.save_json(summary_path, summary)
+                (summary_path.parent / "join_full_semi.csv").write_text("_qid,title\n", encoding="utf-8")
+                pruning.report(args)
+                result = pruning.read_json(args.output)
+                self.assertEqual(result["results"][0]["n_selected"], 0)
+                self.assertTrue(all(row["vs_join_full"]["f1"] == 0.0 for row in result["results"]))
+                self.assertTrue(all(row["vs_join_full"] is not None for row in result["results"]))
+
+    def test_report_rejects_stale_csv_and_incomplete_or_mixed_artifacts(self):
+        for problem in ("count", "ids", "metrics", "progress", "gold", "replay", "binding"):
+            with self.subTest(problem=problem), tempfile.TemporaryDirectory() as directory:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    root = Path(directory)
+                    baseline, args = self.report_fixture(root)
+                    summary_path = args.baseline_summary[0]
+                    summary = pruning.read_json(summary_path)
+                    if problem == "count":
+                        summary["runs"]["join_full"]["vs_labels"].pop("n_pred")
+                        pruning.save_json(summary_path, summary)
+                    elif problem == "ids":
+                        (summary_path.parent / "join_full_semi.csv").write_text("_qid,title\n99,outside\n", encoding="utf-8")
+                    elif problem == "metrics":
+                        (summary_path.parent / "join_full_semi.csv").write_text("_qid,title\n0,a\n1,b\n", encoding="utf-8")
+                    elif problem == "progress":
+                        (root / "run4/progress.jsonl").write_text("", encoding="utf-8")
+                    elif problem == "gold":
+                        scores = pruning.read_json(root / "e5.json")
+                        scores["articles"][0]["gold_matches"] = []
+                        pruning.save_json(root / "e5.json", scores)
+                    elif problem == "replay":
+                        args.replay = [root / "replay.json"]
+                        with patch.dict(sys.modules, {"semijoin_baseline": baseline}):
+                            pruning.replay(SimpleNamespace(scores=args.scores, source_dir=root / "run4", threshold=0.7,
+                                                           calibration=None, output=args.replay[0]))
+                        saved = pruning.read_json(args.replay[0])
+                        saved["summary"]["lm_calls"] = 0
+                        pruning.save_json(args.replay[0], saved)
+                    else:
+                        path = root / "run4/manifest.json"
+                        manifest = pruning.read_json(path)
+                        manifest["baseline_comparison"] = {"sources": [{"summary_sha256": "different"}]}
+                        pruning.save_json(path, manifest)
+                        saved = pruning.read_json(root / "run4/summary.json")
+                        saved["manifest_sha256"] = pruning.digest(manifest)
+                        pruning.save_json(root / "run4/summary.json", saved)
+                    with patch.dict(sys.modules, {"semijoin_baseline": baseline}), self.assertRaises(ValueError):
+                        pruning.report(args)
+                    self.assertFalse(args.output.exists())
+                    baseline.configure.assert_not_called()
+                    baseline.load_articles.assert_not_called()
+
+    def test_report_requires_same_biolord_file_for_four_and_five(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            baseline, args = self.report_fixture(root)
+            scores = pruning.read_json(args.scores)
+            scores["embedding_time_s"] += 1
+            alternate = root / "other-bio.json"
+            pruning.save_json(alternate, scores)
+            with patch.dict(sys.modules, {"semijoin_baseline": baseline}):
+                pruning.run(SimpleNamespace(scores=alternate, output_dir=root / "other5", experiment=5,
+                                            threshold=0.7, calibration=None))
+                args.runs[-1] = (alternate, root / "other5")
+                with self.assertRaisesRegex(ValueError, "same BioLORD score file"):
+                    pruning.report(args)
+
+    def test_report_uses_existing_prf_for_rounding_edge_cases(self):
+        baseline = load_baseline()
+        with patch.dict(sys.modules, {"semijoin_baseline": baseline}):
+            for positives, selected, true_positives in [(10, 246, 4), (32, 160, 9)]:
+                pred = set(range(selected))
+                gold = set(range(true_positives)) | set(range(selected, selected + positives - true_positives))
+                metrics = pruning.comparison_prf(pred, gold)
+                self.assertEqual({key: metrics[key] for key in baseline.prf(pred, gold)}, baseline.prf(pred, gold))
+
     def test_baseline_comparison_rejects_different_recorded_conditions(self):
         baseline = load_baseline()
         with tempfile.TemporaryDirectory() as directory:

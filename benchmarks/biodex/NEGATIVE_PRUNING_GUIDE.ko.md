@@ -56,6 +56,8 @@ run        main → run → output_lock → run_locked
            → 기존 run_early_stop
            → apply_gate → summarize → 결과 JSON
 replay     main → replay → 원본 실행 검증 → apply_gate → summarize
+report     main → report → completed_run + 과거 요약/CSV 검증
+           → comparison_prf → 공통 비교 JSON (LLM 호출 없음)
 ```
 
 LOTUS semantic operator 자체는 수정하지 않는다. 기존 실행기에 논문별 라벨 순서를 전달하고, 5번에서는 실행기에 넘기기 전에 논문을 거른다. 기존 1·2번 호출은 기본 동작을 유지한다.
@@ -629,8 +631,49 @@ PY
 
 `server-config.txt`와 기존 서버의 설정·운영/캐시 절차를 확인한다. GGUF SHA·바이너리 버전·실제 시작 명령은 확인 가능한 경우 함께 보존하며, 미확인 항목은 동일성을 검증한 것처럼 쓰지 않는다. Live 결과 차이는 4번의 동일 판정을 쓰는 replay와 분리해 LLM 응답 변동도 검토한다.
 
+### 12.1 실험 1~5의 품질을 같은 기준으로 집계하기
+
+서버에서 다음 파일을 모은다. 1번 원본 요약과 같은 폴더에는 `join_full_semi.csv`가 있어야 한다. 이 파일이 없으면 `join_full_join.csv`의 `_qid`를 논문당 하나로 모아 사용한다. 2번 요약과 같은 폴더에는 `early_stop_semi.csv`가 필요하다. 요약에 기록된 선택 편수(`vs_labels.n_pred`)와 실제 CSV의 고유 선택 ID 수가 일치해야 한다. 지정한 원본의 CSV가 없거나 기록과 충돌하면 입력을 확인한다.
+
+```bash
+fresh "$R/comparison.json"
+python semijoin_pruning.py report --scores "$R/test_biolord.json" \
+  --baseline-summary "$BASELINE_FULL_SUMMARY" --baseline-summary "$BASELINE_EARLY_SUMMARY" \
+  --run "$R/test_e5.json" "$R/experiment3" \
+  --run "$R/test_biolord.json" "$R/experiment4" \
+  --run "$R/test_biolord.json" "$R/experiment5_conservative" \
+  --replay "$R/experiment5_conservative_replay.json" \
+  --replay "$R/experiment5_retain95_replay.json" \
+  --output "$R/comparison.json"
+```
+
+`report`는 저장된 점수와 결과만 읽는다. 데이터셋을 다시 내려받거나 LLM을 호출할 필요가 없다. 각 `--run`에는 그 실험에 사용한 점수 파일과 완료 폴더를 한 쌍으로 전달한다. 3·4·5번의 논문 순서·정답·라벨 목록·공통 조각과 저장된 LLM 설정을 대조한다. Replay를 포함할 때는 원본 live run도 전달한다. 위 두 replay의 원본은 4번이다.
+
+| `comparison.json` 항목 | 읽는 방법 |
+|---|---|
+| `results[].vs_labels` | 해당 방법이 선택한 논문 ID 집합을 같은 test 정답 양성 논문 ID 집합과 비교 |
+| `results[].vs_join_full` | 같은 선택 ID 집합을 1번 full join이 선택한 논문 ID 집합과 비교. 1번을 제공하지 않은 부분 보고서에서는 `null` |
+| `n_articles`, `n_positive`, `n_selected` | 같은 test 전체 편수, 정답 양성 편수, 각 방법이 선택한 고유 논문 수 |
+| `experiment`, `mode`, `source`, `lm_calls`, `lm_calls_kind` | 실험·원본·논리 호출 수. 같은 5번도 live와 replay를 별도 행으로 표시 |
+| `threshold`, `threshold_source` | 적용한 경계와 기록된 출처. 보정한 두 정책의 경계가 같으면 `threshold_source.policy`로 정책명을 구분 |
+| `reference_scores_sha256` | 정답 기준으로 읽은 `--scores` JSON 내용의 식별자 |
+| `missing_experiments`, `baseline_comparison` | 제공된 결과가 없는 실험 번호와 과거 기록에서 대조한 항목·미확인 항목 |
+
+두 비교에 같은 article-level TP·FP·FN, 선택 수 `n_pred`, precision·recall·F1을 사용하고 P/R/F1은 소수점 넷째 자리까지 반올림한다. 기준 집합만 달라진다. 1번 결과가 실제로 0편이면 빈 집합과 비교하며 분모가 0인 지표의 값은 0이다. 1번이 누락되어 oracle을 계산할 수 없는 경우와 구분된다.
+
+핵심은 두 기준 집합을 같은 함수에 넘기는 것이다. `comparison_prf()`는 기존 baseline의 `prf()`를 재사용하고 정수 TP·FP·FN을 붙인다. `completed_run()`은 replay에서 사용하던 완료 기록 검증을 공유한다.
+
+```python
+"vs_labels": comparison_prf(pred, gold),
+"vs_join_full": comparison_prf(pred, full) if full is not None else None,
+```
+
+1·2번의 옛 ID는 데이터셋 내 행 번호다. 이번 집계는 과거 데이터 revision이나 서버 조건을 추가로 입증하지 않는다. `lm_calls`는 저장된 논리적 평가 횟수이며 replay 행의 값은 재생한 정책 비용이다. **공통으로 재계산하는 지표는 품질 지표다.** 기존 시간·witness 순위는 원래 정의와 측정 구간을 유지한다.
+
 ## 13. 자동 검증과 서버 실험
 
 자동 테스트는 chunk 길이·전체 abstract 보존·E5 prefix·max 집계·무효 점수·threshold 경계·원래 ID·평가 순서·재개·replay·기존 LOTUS 판정 경로를 확인한다. 실제 BioDEX 품질·GPU 시간·모델 효과는 서버에서 측정한다. 이 테스트가 모델 다운로드나 실제 GPU 추론을 대신하지는 않는다.
+
+공통 집계 테스트는 1~5번과 replay의 같은 출력 형식, 기준 없음과 실제 빈 기준의 구분, 원본 불변, 모델·데이터 추가 호출 없음, CSV·완료 기록·gold·참조 파일 불일치 거부, 4·5번 점수 파일 일치, 기존 P/R/F1 반올림 경계값을 확인한다.
 
 로컬 경로와 설정의 근거는 [LiteLLM OpenAI 호환 vLLM 경로](https://docs.litellm.ai/docs/providers/vllm), [llama.cpp server 공식 설명](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)이다. 새 설치·다운로드가 필요해도 기존 1·2번의 모델 배포처·revision·파일을 먼저 확인해 같은 가중치를 가져오며 다른 8B 모델로 암묵적으로 바꾸지 않는다.
