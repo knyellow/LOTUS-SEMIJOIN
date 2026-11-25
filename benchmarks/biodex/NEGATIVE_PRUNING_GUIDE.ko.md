@@ -12,19 +12,21 @@
 
 ### 서버에서 남은 작업
 
-| 팀 기록 | 확인된 내용 | 서버에서 확인할 내용 |
-|---|---|---|
-| 10월 12·15일 회의록의 간 패널 파일럿 | BioDEX test 앞 250편, 본문 앞 8,000자, 정답 양성 10편. Full join은 2,500회·F1 0.102, cascade는 2,115회·F1 0.122 | 250편 `join_full` 원본 요약과 실행 로그. 회의록에 적힌 로그 위치는 `/root/lotus/benchmarks/biodex/semijoin_results/cloudlab_node/semijoin_250.log` |
-| 실험 2 고정 순서 조기 종료 | 기존 실행기는 `early_stop`으로 저장한다. 회의록의 2,115회는 cascade 수치다 | 같은 조건의 250편 `early_stop` 요약. 저장소 이력의 25편 full/cascade 결과는 별도 실행이다 |
+**70B GPU에서 3 → 4 → 5만 새로 실행한다.** 1·2번은 같은 70B·paper·test 앞 250편 조건의 서버 기록을 인용한다. 원본 요약과 선택 논문 CSV가 남아 있지 않아 이 두 행의 호출 수·라벨 F1·외부 경과시간은 별도 표로 보고한다.
 
-**1~5번을 함께 비교하려면** 먼저 서버에 보관된 두 방법의 요약을 찾는다. 11.1절의 `check-baselines`로 현재 점수와 대조한 후, 동일한 요약을 3·4·5번 실행에 전달한다. 해당 기록이 없으면 필요한 방법을 같은 조건으로 새로 측정하고 새 비교군이라고 표시한다. 3~5번만 탐색할 때는 과거 요약 없이 실행할 수 있으며 1·2번과의 설정 대조는 미확인으로 남긴다.
+| 실험 | 논리적 호출 수 | 라벨 기준 F1 | Python 명령 외부 경과시간 |
+|---|---:|---:|---:|
+| 1. 전체 조인 | 2,500 | 0.172 | 7,282초 |
+| 2. 고정 순서 조기 종료 | 1,855 | 0.172 | 1,896초 |
+
+3~5번의 선택 논문과 정답을 새로 집계한다. 과거 전체 조인과의 기사별 일치도는 전체 선택 목록이 있어야 계산할 수 있다. 기록의 출처·실행 조건·복원이 어려운 항목은 [과거 70B 실험 결과](HISTORICAL_70B_RESULTS.ko.md)에 정리했다.
 
 ## 1. 실행 순서부터 보기
 
 | 순서 | 작업 | 필요한 입력 | LLM 호출 |
 |---|---|---|---|
-| 공통 준비 | 기존 서비스와 1·2번 원본 요약 확인 | 서버에 보관된 `join_full`·`early_stop` 기록 | 사전 점검만 |
-| **3번** | E5 test 점수 생성 → 1·2번 요약 대조 → 로컬 LLM 점검 → 3번 실행 | Test abstract + E5 점수 | 첫 매칭에서 종료 |
+| 공통 준비 | 70B GPU 서비스 확인·점수 계산용 파일 사전 준비 | 현재 배포 설정과 과거 실행 조건 | 사전 점검만 |
+| **3번** | E5 test 점수 생성 → 과거 정답 양성 인덱스·패널 순서 대조 → 로컬 LLM 점검 → 3번 실행 | Test abstract + E5 점수 | 첫 매칭에서 종료 |
 | 4번 준비 | BioLORD test·validation 점수 생성 → threshold 고정 | Validation abstract + 정답 반응 | 0회 |
 | **4번** | 두 proxy의 입력 일치 확인 → 로컬 LLM 점검 → 4번 실행 | 3번과 같은 test 논문·라벨 | 첫 매칭에서 종료 |
 | **5번** | 완료된 4번으로 두 정책 replay → 보수적 5번 실측 | 같은 BioLORD 점수 + 고정 threshold | Replay 0회, 실측은 유지한 논문만 |
@@ -281,26 +283,24 @@ run_early_stop
 
 Linux Bash 기준이다. **실제 LLM 평가 순서는 3번 run → 4번 run → 5번 run**이다. 점수 생성·validation 보정·replay는 LLM을 호출하지 않는다. 각 단계가 성공하고 저장 파일을 확인한 뒤 다음 단계로 진행한다.
 
-### 11.0 공통 준비: 기존 실험 서버의 세팅 재사용
+### 11.0 공통 준비: 70B GPU 서비스와 실행 환경
 
-**기본 절차는 1·2번을 실행한 서버에 이미 준비된 Python 환경·LLM 서비스·가중치·운영 설정을 그대로 이용하는 것이다.** 사용자가 지금 GGUF 파일명이나 시작 명령을 별도로 알아내야 진행할 수 있는 절차가 아니다. LLM 가중치의 새 다운로드·새 서버 설치·임의의 context/양자화/GPU 설정으로 재구성하는 작업은 필요하지 않다. E5·BioLORD proxy 모델은 별개이며 score 단계에서 캐시가 없으면 다운로드한다. 서버에 접속한 뒤 기존 환경을 활성화하고, 확인 가능한 설정을 기록한 후 3→4→5를 실행한다.
+먼저 사용 가능한 GPU 노드와 팀의 70B 서비스 배포를 확인한다. 과거 CloudLab 예약의 현재 접속 가능 여부는 확인되지 않았다. 서비스가 준비되어 있으면 기존 endpoint를 사용한다. 중지된 서비스는 팀의 배포 절차로 준비한다. 아래 명령은 서버를 기동하지 않는다.
 
-| 설정 | 확인할 내용 |
+| 항목 | 이번 비교의 기준 |
 |---|---|
-| Python | 기존 1·2번 환경 우선 재사용. 새 환경은 Python 3.10~3.12 |
-| 논문·라벨·질문 | 간 패널 파일럿은 앞 250편·liver. 아래는 기존 코드의 paper 질문을 쓰며, 과거에 사용한 질문은 원본 요약·로그에서 확인 |
-| LLM | 기존 1·2번의 같은 GGUF 파일·양자화·revision |
-| 서버 | 같은 llama.cpp 바이너리·chat template·context·슬롯 수·GPU 설정 |
-| Proxy 장치 | EMBED_DEVICE=cpu 또는 cuda. LLM 추론 장치와 별개 |
-| 저장 경로 | 이번 비교 전체의 새 R. experiment3/4/5 폴더는 실행기가 생성 |
+| 모델·장비 | 과거 기록은 `bartowski/Meta-Llama-3.1-70B-Instruct-GGUF`, `Q4_K_M`, V100 16GB 4장. 현 서버의 가중치·장비·배포 정보를 확인하고 차이를 기록 |
+| LLM 설정 | 같은 paper 질문, temperature 0, 출력 최대 256토큰, `LLM_BATCH=8`, `EARLY_WORKERS=8` |
+| 서버 설정 | 과거 실행 인자는 `-ngl 99 -c 65536 --parallel 8 -fa on -ctk q8_0 -ctv q8_0 --no-jinja --chat-template llama3`. 현 서비스의 설정을 대조하는 참고 기록 |
+| 논문·라벨 | BioDEX test 앞 250편, 본문 앞 8,000자, 같은 순서의 간 라벨 10개와 정답 양성 10편 |
+| Proxy 장치 | `EMBED_DEVICE=cpu` 또는 `cuda`. 세 실험에서 같은 장치를 사용 |
+| 저장 경로 | 새 비교 디렉터리 `R`. experiment3/4/5 폴더는 실행기가 생성 |
 
-기본 경로는 `hosted_vllm/llama3.1-8b` → `http://localhost:8080/v1`이다. `hosted_vllm/`은 LiteLLM의 OpenAI 호환 서버 연결 이름이며 실제 서버가 반드시 vLLM이어야 한다는 뜻은 아니다. **이미 준비된 LLM 서비스에 연결한다.** 코드는 LLM을 새로 다운로드하거나 서버를 시작하지 않으며 외부 유료 OpenAI 모델로 자동 전환하지 않는다.
-
-인접 `biodex_local.py`에는 llama.cpp·Q4_K_M이 명시돼 있고 초기 N=25 커밋에는 Llama-3.1-8B Q4가 적혀 있다. 다만 **과거 N=250 실험에 사용한 실제 GGUF·양자화·서버 명령은 이 기록만으로 확정할 수 없다.** 아래 alias는 코드 기본값 예시다. 기존 서버에 설정된 endpoint·alias·가중치를 우선하며 새 모델로 대체하지 않는다. 파일명·양자화·시작 명령은 서버의 기존 로그·설정에서 확인되는 범위만 기록하고 미확인 항목은 그대로 표시한다. Alias 일치는 가중치 동일성의 증명이 아니다.
+`hosted_vllm/`은 LiteLLM의 OpenAI 호환 서버 연결 이름이다. 서버 운영 설정에서 70B 가중치를 확인한 후 해당 서비스의 실제 모델 ID를 사용한다. 코드의 일반 기본값은 8B이므로 이 가이드에서는 모델을 명시한다. Alias만으로 같은 가중치를 입증할 수 없고, 과거의 dataset revision과 llama.cpp 빌드 커밋은 미확인이다.
 
 #### A. Python 환경과 코드
 
-서버에서 기존 1·2번용 Conda/venv 또는 팀의 환경 설정 스크립트를 먼저 활성화한 뒤 저장소 루트에서 시작한다. 기존 패키지 버전을 유지하기 위해 현재 checkout만 editable로 연결한다.
+서버에서 팀의 LOTUS Conda/venv 또는 환경 설정 스크립트를 먼저 활성화한 뒤 저장소 루트에서 시작한다. 기존 패키지 버전을 유지하기 위해 현재 checkout만 editable로 연결한다.
 
 ```bash
 set -euo pipefail
@@ -319,35 +319,32 @@ cd benchmarks/biodex
 
 `cuda` 임베딩은 CUDA 지원 PyTorch와 여유 VRAM이 있을 때만 사용한다. LLM이 GPU에서 실행돼도 proxy는 CPU로 계산할 수 있다. 기존 LLM 서비스와 GPU 메모리가 겹치면 proxy를 CPU나 다른 GPU에서 계산한다. 기존 서비스의 중지·재시작이 필요한 경우에는 서버의 원래 운영 절차만 사용한다. 모델 다운로드를 포함한 cold 비용과 캐시가 준비된 비용도 구분한다.
 
-새 환경을 CI와 같은 의존성 버전으로 맞추려면 저장소 루트에서 `python -m pip install uv`, `uv export --locked --no-emit-project --no-hashes --all-extras -o /tmp/lotus-constraints.txt`, `uv pip install --python "$(command -v python)" -e . datasets --constraint /tmp/lotus-constraints.txt`를 사용한다. 기존 1·2번 환경을 유지할 때는 패키지를 임의로 업그레이드하지 않는다. 서버에 GGUF가 없다면 기존 배포처·revision·정확한 파일명을 확인해 같은 파일을 복원하고 SHA를 대조한다.
+새 환경을 CI와 같은 의존성 버전으로 맞추려면 저장소 루트에서 `python -m pip install uv`, `uv export --locked --no-emit-project --no-hashes --all-extras -o /tmp/lotus-constraints.txt`, `uv pip install --python "$(command -v python)" -e . datasets --constraint /tmp/lotus-constraints.txt`를 사용한다. 기존 환경을 사용할 때에는 설치된 버전을 기록한다.
 
 #### B. 기존 endpoint·설정 유지와 기록
 
-아래는 간 패널 파일럿이므로 N·패널·질문을 명시한다. 서버 요약·로그에 다른 질문이 기록됐다면 그 조건에 맞춘 후 시작한다. 두 요약 경로는 **서버에서 찾은 원본의 절대 경로**로 바꾼다. 파일명은 보관 방식에 따라 달라질 수 있으므로 JSON 안의 `runs`를 확인한다. 서버 설정은 기존 환경을 우선한다. `LLAMA_SERVER`·`MODEL_GGUF` 경로를 새로 채우는 것은 필수가 아니다. 로컬 연결은 `hosted_vllm/<기존 서버 모델 ID>`를 사용한다. 실제 모델 ID는 유지하고 이 연결용 접두어로 `LLM_API_BASE`가 적용되게 한다.
+실제 70B GPU 배포의 모델 ID를 확인하고 `LLM_MODEL=hosted_vllm/<실제 ID>` 형식으로 내보낸 다음 실행한다. 클라이언트와 서버가 다른 호스트라면 `LLM_API_BASE`도 해당 서버 주소로 지정한다. 서버에 기존 파일 경로가 있으면 `MODEL_GGUF`, `LLAMA_SERVER`에서 파일 SHA를 추가로 기록할 수 있다.
 
 ```bash
 export N_ARTICLES=250
 export REACTION_SET=liver
 export PROMPT=paper
-export BASELINE_FULL_SUMMARY=/absolute/path/to/full-run/summary_full.json
-export BASELINE_EARLY_SUMMARY=/absolute/path/to/early-run/summary_early.json
-test -s "$BASELINE_FULL_SUMMARY"
-test -s "$BASELINE_EARLY_SUMMARY"
-export LLM_MODEL="${LLM_MODEL:-hosted_vllm/llama3.1-8b}"
+: "${LLM_MODEL:?배포에서 확인한 70B 모델을 hosted_vllm/모델ID 형식으로 지정하세요}"
+export LLM_MODEL
 export LLM_API_BASE="${LLM_API_BASE:-http://127.0.0.1:8080/v1}"
 case "$LLM_MODEL" in
+  hosted_vllm/llama3.1-8b) printf '70B 서비스의 모델 ID를 지정하세요.\n' >&2; exit 1 ;;
   hosted_vllm/?*) ;;
   *) printf '로컬 경로는 hosted_vllm/<기존 서버 모델 ID>를 사용하세요. 가중치는 변경하지 않습니다.\n' >&2; exit 1 ;;
 esac
-export LLM_BATCH="${LLM_BATCH:-4}"
-export EARLY_WORKERS="${EARLY_WORKERS:-4}"
+export LLM_BATCH=8
+export EARLY_WORKERS=8
 export EMBED_DEVICE="${EMBED_DEVICE:-cpu}"
 export SERVER_CACHE_POLICY="${SERVER_CACHE_POLICY:-existing_server_initial_kv_uncontrolled}"
 export BENCHMARK_DIR="$(pwd)"
 export R="$(pwd)/pruning_results/${REACTION_SET}_${PROMPT}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$(dirname "$R")"
 mkdir "$R"
-sha256sum "$BASELINE_FULL_SUMMARY" "$BASELINE_EARLY_SUMMARY" > "$R/baseline-files.sha256"
 curl_auth=()
 if [ -n "${HOSTED_VLLM_API_KEY:-}" ]; then
   curl_auth=(-H "Authorization: Bearer $HOSTED_VLLM_API_KEY")
@@ -359,7 +356,7 @@ if [ -f "${MODEL_GGUF:-}" ] && [ -r "${MODEL_GGUF:-}" ] && \
   sha256sum "$MODEL_GGUF" "$LLAMA_SERVER" > "$R/server-files.sha256"
 fi
 {
-  printf 'source=existing_experiments_1_2_server\n'
+  printf 'source=current_70b_gpu_service\n'
   printf 'model_alias=%s\nendpoint=%s\ncache_policy=%s\n' \
     "$LLM_MODEL" "$LLM_API_BASE" "$SERVER_CACHE_POLICY"
   if [ -f "$R/server-files.sha256" ]; then
@@ -371,8 +368,7 @@ fi
 export LLM_SERVER_ID="$(sha256sum "$R/server-config.txt" | cut -d' ' -f1)"
 printf 'set -euo pipefail\n' > "$R/settings.sh"
 for name in R REACTION_SET PROMPT LLM_MODEL LLM_API_BASE LLM_BATCH EARLY_WORKERS \
-            EMBED_DEVICE N_ARTICLES SERVER_CACHE_POLICY LLM_SERVER_ID BENCHMARK_DIR \
-            BASELINE_FULL_SUMMARY BASELINE_EARLY_SUMMARY; do
+            EMBED_DEVICE N_ARTICLES SERVER_CACHE_POLICY LLM_SERVER_ID BENCHMARK_DIR; do
   printf 'export %s=%q\n' "$name" "${!name}"
 done >> "$R/settings.sh"
 git rev-parse HEAD > "$R/code_commit.txt"
@@ -388,7 +384,7 @@ fresh() {
 }
 ```
 
-기존 설정 파일·시작 로그에서 가중치 revision·양자화·서버 버전·시작 명령을 확인할 수 있으면 **위 fingerprint를 생성하기 전에** 그 내용을 `server-config.txt` 생성 블록에 추가한다. 인증 정보는 기록하지 않는다. Endpoint URL에도 비밀 키를 넣지 않는다. 기존 인증은 환경에서 재사용하며 `settings.sh`에 키를 저장하지 않는다.
+GPU 서버에서 `nvidia-smi -L` 출력을 이번 실행의 `$R/gpu.txt`에 보존하고, 클라이언트가 다른 호스트이면 서버에서 가져온 기록임을 표시한다. 기존 설정 파일·시작 로그에서 가중치 revision·양자화·서버 버전·시작 명령을 확인할 수 있으면 **위 fingerprint를 생성하기 전에** 그 내용을 `server-config.txt` 생성 블록에 추가한다. 인증 정보는 기록하지 않는다. Endpoint URL에도 비밀 키를 넣지 않는다. 기존 인증은 환경에서 재사용하며 `settings.sh`에 키를 저장하지 않는다.
 
 `R`은 비교 전체에서 한 번만 만든다. 새 터미널에서는 같은 환경과 기존 인증을 활성화하고, 출력된 절대 경로의 `settings.sh`를 source한다. `LLM_SERVER_ID`는 기록한 설정의 식별자다. 파일 SHA를 확보하지 못했다면 **기록의 일치만 확인하며 실제 가중치 동일성을 증명하지 않는다.** 미확인 정보 때문에 새 모델·새 설정을 선택하지 않고 기존 서비스를 유지한다.
 
@@ -412,7 +408,6 @@ preflight() {
     *) printf '로컬 경로는 hosted_vllm/<기존 서버 모델 ID>가 필요합니다.\n' >&2; return 1 ;;
   esac
   fresh "$R/${run_name}_preflight.log" "$R/${run_name}_models.json"
-  sha256sum --check --status "$R/baseline-files.sha256"
   if [ -f "$R/server-files.sha256" ]; then
     sha256sum --check --status "$R/server-files.sha256"
   fi
@@ -445,6 +440,29 @@ declare -f fresh preflight >> "$R/settings.sh"
 
 기본 로컬 경로는 외부 OpenAI API 키가 필요 없다. 기존 서버 인증이 필요하면 기존 `HOSTED_VLLM_API_KEY` 환경값을 사용한다. 위 curl 점검도 이를 재사용하며 키를 기록하지 않는다. `/health` 같은 엔진 전용 endpoint는 선택 점검이며 공통 절차는 `/models`와 실제 LOTUS 요청으로 확인한다. 접속 오류·alias 불일치·빈 응답이 있으면 본 실험을 시작하지 않는다. LOTUS 응답 cache는 기본 False이며 서버의 prompt/KV cache와 별개다.
 
+#### E. 시간 측정 전 데이터·임베딩 모델 파일 준비
+
+본 측정과 같은 사용자·환경·캐시 경로에서 한 번 실행한다. Test·validation 데이터, E5와 BioLORD 가중치·tokenizer의 최초 다운로드를 이 단계에서 마치고 준비 로그를 남긴다. 새 Python 프로세스가 파일을 메모리로 읽는 시간과 일반적인 Hub 메타데이터 조회 지연은 test score 명령 시간에 포함될 수 있다. 측정 로그에서 실제 파일 다운로드를 확인하면 해당 시간을 ‘네트워크·다운로드 포함’으로 표시한다.
+
+```bash
+fresh "$R/preparation.log"
+python - <<'PY' > "$R/preparation.log" 2>&1
+from datasets import load_dataset
+from transformers import AutoTokenizer
+from lotus.models import SentenceTransformersRM
+from semijoin_pruning import MODELS
+
+for split in ('test', 'validation'):
+    data = load_dataset('BioDEX/BioDEX-Reactions', split=split)
+    print(split, len(data), data._fingerprint)
+for model in MODELS.values():
+    AutoTokenizer.from_pretrained(model)
+    rm = SentenceTransformersRM(model=model, device='cpu', normalize_embeddings=True)
+    print(model, rm.transformer.max_seq_length)
+    del rm
+PY
+```
+
 ### 11.1 실험 3: E5 점수 → 서버 점검 → 3번 실행
 
 사전 설정: 위 공통 환경, 같은 논문 수·패널·프롬프트, 새 출력, proxy 계산용 메모리를 확인한다. Score는 LLM 없이 실행된다.
@@ -456,37 +474,32 @@ fresh "$R/test_e5.json" "$R/test_e5_score_wall_s.txt" "$R/test_e5_score.log"
   --device "$EMBED_DEVICE" --output "$R/test_e5.json" > "$R/test_e5_score.log" 2>&1
 ```
 
-**과거 요약과 먼저 대조한다.** 다음 명령은 LLM을 호출하지 않는다. 250편·라벨 수와 순서·정답 양성 수·패널·프롬프트 이름·모델 이름 중 원본에 기록된 값이 다르면 중단한다.
+과거 기록에 있는 **test 행 인덱스와 라벨 순서**를 E5 점수 파일에서 대조한다. 행 번호는 0부터 센다. 같은 인덱스에서 양성 10편이 일치해도 과거 데이터 revision과 250편 전체의 원문 동일성은 미확인으로 남는다.
 
 ```bash
-fresh "$R/baseline-comparison.json"
-python semijoin_pruning.py check-baselines "$R/test_e5.json" \
-  --baseline-summary "$BASELINE_FULL_SUMMARY" --baseline-summary "$BASELINE_EARLY_SUMMARY" \
-  --output "$R/baseline-comparison.json"
-python - "$R/baseline-comparison.json" <<'PY'
+python - "$R/test_e5.json" <<'PY'
 import json, sys
 from pathlib import Path
-report = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-for source in report['sources']:
-    print(source['methods'], 'missing fields:', source['missing_fields'])
-print('Not established by summaries:', report['unverified'])
-if report['missing_methods']:
-    raise SystemExit(f"Missing baseline methods: {report['missing_methods']}")
+scores = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+rows = scores['articles']
+assert scores['split'] == 'test' and [row['_qid'] for row in rows] == list(range(250))
+assert [row['_qid'] for row in rows if row['gold_matches']] == [29, 119, 134, 143, 148, 153, 158, 167, 198, 223]
+assert scores['reactions'] == [
+    'Drug-induced liver injury', 'Hepatic function abnormal', 'Hepatotoxicity', 'Liver injury',
+    'Hepatic failure', 'Hepatic enzyme increased', 'Acute hepatic failure', 'Hepatitis',
+    'Immune-mediated hepatitis', 'Hepatic necrosis',
+]
+print('250 test rows, 10 historical gold-positive indices and ordered liver panel match')
 PY
 ```
 
-`reported_fields_match_only`는 과거 요약에 **기록된 비교 항목의 일치**를 뜻한다. 누락 필드는 로그에서 보완하거나 미확인으로 표시한다. 같은 수의 논문과 같은 모델 이름만으로 과거 PMID·입력 원문·dataset revision·실제 프롬프트와 파서·가중치·서버 설정·타이머 및 캐시 조건까지 입증할 수 없다. 3·4·5번의 각 run은 전달된 과거 요약을 다시 검사하고 비교 결과와 요약 식별자를 manifest에 저장한다.
-
-각 방법의 기록에는 양의 정수 `n_articles`가 있어야 한다. 빈 객체·방법 이름만 적힌 객체는 실제 결과로 인정하지 않는다. 다른 누락 필드는 보고서에 남기며, 기존 요약을 추정값으로 채우지 않는다. 참조 요약을 전달하지 않은 기존 실행 방식은 유지한다. 이미 만든 실행 폴더에 참조 요약을 나중에 추가하면 설정이 달라지므로 새 출력 폴더를 사용한다. 요약 대조는 기존 1·2번의 결과나 측정값을 변경하지 않는다.
-
-대조 보고서를 확인한 뒤 기존 서비스에서 다음 명령을 실행한다. **3번에는 threshold를 넣지 않는다.**
+대조가 끝나면 3번을 실행한다. 3번에는 threshold를 넣지 않는다.
 
 ```bash
 preflight experiment3
 fresh "$R/experiment3" "$R/experiment3_wall_s.txt" "$R/experiment3.log"
 /usr/bin/time -f '%e' -o "$R/experiment3_wall_s.txt" \
   python semijoin_pruning.py run "$R/test_e5.json" --experiment 3 \
-  --baseline-summary "$BASELINE_FULL_SUMMARY" --baseline-summary "$BASELINE_EARLY_SUMMARY" \
   --output-dir "$R/experiment3" > "$R/experiment3.log" 2>&1
 test -s "$R/experiment3/summary.json"
 test -s "$R/experiment3/articles.json"
@@ -534,13 +547,12 @@ preflight experiment4
 fresh "$R/experiment4" "$R/experiment4_wall_s.txt" "$R/experiment4.log"
 /usr/bin/time -f '%e' -o "$R/experiment4_wall_s.txt" \
   python semijoin_pruning.py run "$R/test_biolord.json" --experiment 4 \
-  --baseline-summary "$BASELINE_FULL_SUMMARY" --baseline-summary "$BASELINE_EARLY_SUMMARY" \
   --output-dir "$R/experiment4" > "$R/experiment4.log" 2>&1
 test -s "$R/experiment4/summary.json"
 test -s "$R/experiment4/articles.json"
 ```
 
-저장 파일 구성은 3번과 같다. 4번 결과와 BioLORD score를 그대로 5번에 쓴다. 전체 test를 비교하는 별도 실험은 전체 test에서 측정한 1·2번 요약을 사용하고 두 test score 명령의 `--n-articles`와 위 건수 검사도 실제 범위에 맞춘다.
+저장 파일 구성은 3번과 같다. 4번 결과와 BioLORD score를 그대로 5번에 쓴다.
 
 ### 11.3 실험 5: 두 정책 replay → 보수적 조건 1회 실측
 
@@ -564,7 +576,6 @@ preflight experiment5_conservative
 fresh "$R/experiment5_conservative" "$R/experiment5_conservative_wall_s.txt" "$R/experiment5_conservative.log"
 /usr/bin/time -f '%e' -o "$R/experiment5_conservative_wall_s.txt" \
   python semijoin_pruning.py run "$R/test_biolord.json" --experiment 5 \
-  --baseline-summary "$BASELINE_FULL_SUMMARY" --baseline-summary "$BASELINE_EARLY_SUMMARY" \
   --calibration "$R/thresholds.json" --policy conservative \
   --output-dir "$R/experiment5_conservative" > "$R/experiment5_conservative.log" 2>&1
 test -s "$R/experiment5_conservative/summary.json"
@@ -584,13 +595,12 @@ preflight experiment3_resume1
 fresh "$R/experiment3_resume1_wall_s.txt" "$R/experiment3_resume1.log"
 /usr/bin/time -f '%e' -o "$R/experiment3_resume1_wall_s.txt" \
   python semijoin_pruning.py run "$R/test_e5.json" --experiment 3 \
-  --baseline-summary "$BASELINE_FULL_SUMMARY" --baseline-summary "$BASELINE_EARLY_SUMMARY" \
   --output-dir "$R/experiment3" > "$R/experiment3_resume1.log" 2>&1
 ```
 
 4번은 원래 점수와 번호를, 5번은 원래 calibration·policy까지 그대로 사용한다. 재개 시간은 남은 작업 시간이며 전체 시간이 아니다. 첫 미완료 논문에서 잃은 pair 호출도 있어 단순 합산을 무중단 실험과 같다고 보고하지 않는다. 완료 폴더 재호출은 저장 결과를 짧게 반환하므로 원래 timer를 덮어쓰지 않는다. 시간 본 결과가 필요하면 새 출력 폴더에서 무중단 실측한다. 새 코드의 manifest/summary 식별 필드가 없는 옛 실행을 수동 편집해 재사용하지 않는다. 유효한 기존 score는 보존하고 새 실행 폴더를 사용한다.
 
-혈액 패널은 `REACTION_SET=haematologic`, 해당 패널의 1·2번 요약, 새 `R`로 동일하게 3→4→5를 반복한다. Liver의 score·calibration·실행 폴더는 별도로 둔다.
+다른 패널과 전체 test는 별도 연구 조건이다. 현재 70B 과거 수치는 간 패널 250편에만 사용한다.
 
 ## 12. 결과 읽기와 설정 비교
 
@@ -604,14 +614,15 @@ root = Path(os.environ['R'])
 read = lambda path: json.loads(path.read_text(encoding='utf-8'))
 names = ['experiment3', 'experiment4', 'experiment5_conservative']
 ms = [read(root / name / 'manifest.json') for name in names]
-report = read(root / 'baseline-comparison.json')
-assert all(m['baseline_comparison'] == report for m in ms), 'Baseline comparison changed'
+assert all(m['model'] == os.environ['LLM_MODEL'] and m['workers'] == 8 and m['llm_batch'] == 8 for m in ms)
+assert all(m['max_tokens'] == 256 and m['temperature'] == 0 for m in ms)
 for key in ['model', 'instruction', 'max_tokens', 'temperature', 'workers', 'llm_batch', 'endpoint_sha256', 'llm_server_id']:
     assert len({json.dumps(m[key], sort_keys=True) for m in ms}) == 1, key
 assert ms[1]['scores_sha256'] == ms[2]['scores_sha256']
 for name, score_time in zip(names, ['test_e5_score_wall_s.txt', 'test_biolord_score_wall_s.txt', 'test_biolord_score_wall_s.txt']):
     summary = read(root / name / 'summary.json')
     rows = read(root / name / 'articles.json')
+    assert [r['_qid'] for r in rows if r['gold_positive']] == [29, 119, 134, 143, 148, 153, 158, 167, 198, 223]
     ranks = [r['first_gold_witness_rank'] for r in rows if r['gold_positive']]
     print(name, 'calls', summary['lm_calls'], 'F1', summary['f1'], 'recall', summary['recall'])
     print('mean first gold witness rank', sum(ranks) / len(ranks) if ranks else None)
@@ -627,18 +638,17 @@ PY
 
 합계는 test score 생성과 live run을 별도로 측정한 시간의 합이며 단일 프로세스 end-to-end 실측은 아니다. Validation 준비 시간은 별도다. 4·5번이 score를 공유하더라도 각 방법의 비용에는 각각 BioLORD score 생성 비용을 포함한다. 3·4번 gold 순위는 같은 정답 양성 ID 전체로 비교하고, 5번의 순서가 4번보다 좋아졌다는 근거로 쓰지 않는다.
 
-**1~5번 속도비는 아직 별도 확인이 필요하다.** 기존 full의 `time_s`는 버전에 따라 join 한 번의 시간 또는 chunk별 시간 합이다. 기존 early의 `time_s`는 그 실행에서 조기 종료 실행기를 호출한 구간이다. 요약 대조는 타이머의 범위를 바꾸지 않는다. 같은 구간의 과거 외부 wall time이 있으면 그 기록을 사용하고, 없으면 동일 조건·새 출력에서 1·2번을 각각 외부 타이머로 재측정한 뒤 속도비를 계산한다.
+과거 1번 7,282초와 2번 1,896초는 서버가 이미 기동된 상태에서 Python 명령 시작부터 종료까지 잰 외부 경과시간이다. 새 실험은 최초 파일 다운로드·서버 준비·사전 점검을 따로 수행한다. 본 측정 중 발생한 Hub 메타데이터 조회·추가 다운로드 시간은 외부 타이머에 포함된다. 과거와 GPU 종류·수, 가중치·서버 설정, 캐시 정책의 일치 여부를 기록한다. 확인되지 않은 차이가 있으면 시간은 출처·조건과 함께 나열하고 같은 환경에서 얻은 속도비라고 보고하지 않는다.
 
 `server-config.txt`와 기존 서버의 설정·운영/캐시 절차를 확인한다. GGUF SHA·바이너리 버전·실제 시작 명령은 확인 가능한 경우 함께 보존하며, 미확인 항목은 동일성을 검증한 것처럼 쓰지 않는다. Live 결과 차이는 4번의 동일 판정을 쓰는 replay와 분리해 LLM 응답 변동도 검토한다.
 
-### 12.1 실험 1~5의 품질을 같은 기준으로 집계하기
+### 12.1 실험 3~5의 품질 집계와 과거 1·2번 인용
 
-서버에서 다음 파일을 모은다. 1번 원본 요약과 같은 폴더에는 `join_full_semi.csv`가 있어야 한다. 이 파일이 없으면 `join_full_join.csv`의 `_qid`를 논문당 하나로 모아 사용한다. 2번 요약과 같은 폴더에는 `early_stop_semi.csv`가 필요하다. 요약에 기록된 선택 편수(`vs_labels.n_pred`)와 실제 CSV의 고유 선택 ID 수가 일치해야 한다. 지정한 원본의 CSV가 없거나 기록과 충돌하면 입력을 확인한다.
+다음 명령은 이번에 측정한 3~5번과 두 replay만 집계한다. 과거 1·2번의 수치는 [70B 실험 기록](HISTORICAL_70B_RESULTS.ko.md)에서 인용한다. 원본 선택 CSV와 요약이 없어 과거 F1이나 호출 수만으로는 `report`에 넣을 수 없다.
 
 ```bash
 fresh "$R/comparison.json"
 python semijoin_pruning.py report --scores "$R/test_biolord.json" \
-  --baseline-summary "$BASELINE_FULL_SUMMARY" --baseline-summary "$BASELINE_EARLY_SUMMARY" \
   --run "$R/test_e5.json" "$R/experiment3" \
   --run "$R/test_biolord.json" "$R/experiment4" \
   --run "$R/test_biolord.json" "$R/experiment5_conservative" \
@@ -659,16 +669,9 @@ python semijoin_pruning.py report --scores "$R/test_biolord.json" \
 | `reference_scores_sha256` | 정답 기준으로 읽은 `--scores` JSON 내용의 식별자 |
 | `missing_experiments`, `baseline_comparison` | 제공된 결과가 없는 실험 번호와 과거 기록에서 대조한 항목·미확인 항목 |
 
-두 비교에 같은 article-level TP·FP·FN, 선택 수 `n_pred`, precision·recall·F1을 사용하고 P/R/F1은 소수점 넷째 자리까지 반올림한다. 기준 집합만 달라진다. 1번 결과가 실제로 0편이면 빈 집합과 비교하며 분모가 0인 지표의 값은 0이다. 1번이 누락되어 oracle을 계산할 수 없는 경우와 구분된다.
+이번 명령의 예상값은 `missing_experiments: [1, 2]`와 모든 행의 `vs_join_full: null`이다. `vs_labels`는 article-level TP·FP·FN, 선택 수와 소수점 네 자리로 반올림한 precision·recall·F1을 제공한다. `lm_calls`는 논리적 평가 횟수이고, replay에서는 4번 판정으로 재생한 정책의 비용이다. 시간과 witness 순위는 12절의 출력에서 별도로 읽는다.
 
-핵심은 두 기준 집합을 같은 함수에 넘기는 것이다. `comparison_prf()`는 기존 baseline의 `prf()`를 재사용하고 정수 TP·FP·FN을 붙인다. `completed_run()`은 replay에서 사용하던 완료 기록 검증을 공유한다.
-
-```python
-"vs_labels": comparison_prf(pred, gold),
-"vs_join_full": comparison_prf(pred, full) if full is not None else None,
-```
-
-1·2번의 옛 ID는 데이터셋 내 행 번호다. 이번 집계는 과거 데이터 revision이나 서버 조건을 추가로 입증하지 않는다. `lm_calls`는 저장된 논리적 평가 횟수이며 replay 행의 값은 재생한 정책 비용이다. **공통으로 재계산하는 지표는 품질 지표다.** 기존 시간·witness 순위는 원래 정의와 측정 구간을 유지한다.
+원본이 나중에 복구되면 선택적으로 `--baseline-summary`를 추가해 집계할 수 있다. 각 요약과 같은 디렉터리에 1번은 `join_full_semi.csv` 또는 `join_full_join.csv`, 2번은 `early_stop_semi.csv`가 필요하다. 기존 요약의 선택 편수와 CSV가 맞아야 한다. 과거의 정답 양성 인덱스나 부분 진행 기록으로 선택 목록을 대체할 수 없다.
 
 ## 13. 자동 검증과 서버 실험
 
@@ -676,4 +679,4 @@ python semijoin_pruning.py report --scores "$R/test_biolord.json" \
 
 공통 집계 테스트는 1~5번과 replay의 같은 출력 형식, 기준 없음과 실제 빈 기준의 구분, 원본 불변, 모델·데이터 추가 호출 없음, CSV·완료 기록·gold·참조 파일 불일치 거부, 4·5번 점수 파일 일치, 기존 P/R/F1 반올림 경계값을 확인한다.
 
-로컬 경로와 설정의 근거는 [LiteLLM OpenAI 호환 vLLM 경로](https://docs.litellm.ai/docs/providers/vllm), [llama.cpp server 공식 설명](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)이다. 새 설치·다운로드가 필요해도 기존 1·2번의 모델 배포처·revision·파일을 먼저 확인해 같은 가중치를 가져오며 다른 8B 모델로 암묵적으로 바꾸지 않는다.
+로컬 경로와 설정의 근거는 [LiteLLM OpenAI 호환 vLLM 경로](https://docs.litellm.ai/docs/providers/vllm), [llama.cpp server 공식 설명](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)이다. 과거 배포의 설정과 확인되지 않은 항목은 [70B 실험 기록](HISTORICAL_70B_RESULTS.ko.md)에 정리했다.
