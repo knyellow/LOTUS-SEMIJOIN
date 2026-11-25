@@ -152,7 +152,7 @@ For more, you can checkout the official [docs](https://lotus-ai.readthedocs.io/e
 
 ## BioDEX semi-join experiments (팀 프로젝트)
 
-기존 조기 종료 실행기에 E5·BioLORD의 라벨 정렬과 논문 단위 negative pruning을 연결합니다. 임베딩은 CPU, 70B LLM 판정은 GPU에서 수행하며, 같은 초록 조각과 기존 본문 앞 8,000자 입력을 사용합니다. 새 실측은 3→4→5 각 1회입니다.
+기존 조기 종료 실행기에 E5·BioLORD의 라벨 정렬과 논문 단위 negative pruning을 연결합니다. 70B LLM은 기존 GPU 설정을 유지하고, 임베딩은 사전 시험을 통과한 GPU 한 장 또는 CPU를 선택해 통일합니다. 같은 초록 조각과 기존 본문 앞 8,000자 입력을 사용하며, 새 실측은 3→4→5 각 1회입니다.
 
 | 읽을 문서 | 확인할 내용 |
 |---|---|

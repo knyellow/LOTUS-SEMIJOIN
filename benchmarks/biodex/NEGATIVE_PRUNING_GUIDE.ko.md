@@ -24,7 +24,7 @@ Semi-join은 각 논문에 대해 **조건을 만족하는 라벨이 하나라�
 | 데이터·질문 | BioDEX test 앞 250편, liver 10개 라벨, `paper` | 같은 질문과 논문 범위에서 비교합니다. |
 | Proxy 입력 | **Abstract 전체** | 초록의 뒷부분도 순서·생략 판단에 활용합니다. |
 | LLM 입력 | **`fulltext_processed[:8000]`** | 기존 LLM 판정 입력을 유지합니다. 단위는 문자입니다. |
-| 임베딩 장치 | **CPU** | 70B GPU 메모리를 추가 점유하지 않고 점수·보정 조건을 통일합니다. |
+| 임베딩 장치 | **사전 시험을 통과한 GPU 한 장, 사용할 수 없으면 CPU** | 70B 배정을 유지하면서 임베딩을 가속합니다. 3번 전에 선택하고 세 점수 생성의 장치를 통일합니다. |
 | 조각·점수 | 공통 128토큰 이내, 겹침 없음, 라벨별 최대 cosine similarity | 같은 텍스트 조각에서 모델을 비교하고 어느 조각의 관련 근거든 포착합니다. |
 | Threshold | Validation gold 양성 100% 보존이 주 조건, 최소 95%가 보조 조건 | 임의의 cutoff 대신 검증 데이터의 정답으로 비용·손실 조건을 정합니다. |
 
@@ -36,7 +36,8 @@ Semi-join은 각 논문에 대해 **조건을 만족하는 라벨이 하나라�
 - E5는 기본적으로 512토큰까지 받을 수 있지만, 이번에는 BioLORD와 같은 원문 조각을 사용합니다. 각 모델을 별도로 최적화한 최고 성능 비교가 아니라 **같은 초록 조각에서의 모델 비교**입니다.
 - 한 조각의 의미가 라벨과 가깝다면 그 논문 안에서 해당 라벨을 먼저 평가하려고 최대 점수를 사용합니다. 긴 초록은 우연히 높은 최대값을 얻을 수 있으므로 threshold는 같은 조각 정책과 라벨 패널에서만 적용합니다.
 - 겹침을 두지 않아 중복 임베딩을 줄입니다. 경계에서 문맥이 끊길 수 있다는 한계는 남습니다.
-- CPU를 선택해도 가중치·입력·정밀도·정규화는 유지합니다. CPU/GPU의 부동소수점 계산은 완전히 같지 않을 수 있으므로 E5 test와 BioLORD test·validation을 모두 CPU로 계산합니다. [PyTorch 수치 정확도 설명](https://docs.pytorch.org/docs/stable/notes/numerical_accuracy.html)
+- GPU 수나 시스템 RAM만으로 사용 가능 여부를 판단하지 않습니다. 실제 score 실행 호스트에서 배정받은 GPU를 확인하고 두 모델을 별도 프로세스로 시험합니다. 사용할 수 없으면 CPU로 정하며, E5 test와 BioLORD test·validation 모두 선택한 같은 장치·GPU UUID를 사용합니다. [실행 전 장치 점검](NEGATIVE_PRUNING_RUNBOOK.ko.md#임베딩-장치-점검선택)
+- 가중치·입력·정밀도·정규화는 장치 선택과 무관하게 유지합니다. CPU/GPU의 부동소수점 계산은 완전히 같지 않을 수 있으므로 점수·validation 보정을 섞지 않습니다. [PyTorch 수치 정확도 설명](https://docs.pytorch.org/docs/stable/notes/numerical_accuracy.html)
 - `paper`는 조건이 논문에 기술됐는지를 묻는 질문입니다. 실제 약물 부작용 여부를 묻는 `adr`로 바꾸지 않습니다. Test 정답은 순서·생략·LLM 입력에 넣지 않고 평가에만 사용합니다.
 - 고정된 test 자료에서 abstract 전체가 LLM 입력 8,000자 안에도 포함되는지는 [별도 증거 PR](https://github.com/knyellow/LOTUS-SEMIJOIN/pull/2)에서 검사합니다. 이 검사는 과거 노드의 데이터 revision이나 실제 서버의 추가 잘림까지 확인하지는 않습니다.
 
@@ -92,6 +93,8 @@ Gold 라벨과 표적 라벨이 하나라도 겹치는 논문을 article-level �
 ### 4.2 조각과 라벨을 임베딩해 논문별 점수를 구합니다
 
 `make_scores()`는 한 번에 선택한 임베딩 모델 하나를 로드합니다. 다른 모델의 tokenizer는 공통 길이 검사에 사용합니다. E5는 문서에 `passage: `, 라벨에 `query: `를 붙이며 BioLORD에는 접두어를 붙이지 않습니다.
+
+기존 `score --device`가 LOTUS 래퍼를 거쳐 실제 SentenceTransformer 장치에 전달되므로 GPU 전환을 위한 Python 수정은 필요하지 않습니다. GPU에서는 임베딩 forward를 실행하며, 토크나이징·초록 분할·벡터를 CPU로 가져온 뒤의 유사도·max 집계는 기존처럼 CPU입니다. CPU 복사가 완료된 후 내부 시간을 기록하고, score 프로세스 종료로 해당 임베딩 GPU 메모리를 반환합니다. 70B 서버의 상주 메모리는 이와 별개입니다.
 
 정규화한 벡터의 내적으로 cosine similarity를 계산하고, 같은 논문·라벨의 조각 점수 중 최대를 사용합니다. 예를 들어 한 라벨의 조각 점수가 0.2와 0.8이면 논문 점수는 0.8입니다. 이 점수는 정답 판정이 아니라 평가 순서·생략 여부를 정하는 proxy입니다.
 
@@ -175,6 +178,7 @@ threshold = finite_positive_scores[
 | 파일 | 담는 내용 |
 |---|---|
 | 점수 JSON | 모델·장치·조각·입력 식별자, 논문별 점수·gold |
+| `embedding-choice.json`·시험 로그 | 최종 CPU/GPU 선택·물리 GPU UUID·호스트·선택 이유와 두 모델의 실행 점검 |
 | `manifest.json` | 실험·점수 해시·threshold·LLM·endpoint·서버 기록 식별자 |
 | `progress.jsonl` | 평가 완료 논문의 `_qid`, `matched`, `lm_calls`, `time_s` |
 | `articles.json` | 생략 논문을 포함한 전체 결과·gold·순위 |
@@ -192,6 +196,7 @@ threshold = finite_positive_scores[
 - `completed_run()`은 replay와 report가 공유합니다. 원본 점수, 전체 평가 기록, 논문별 결과, 요약, manifest를 대조하며 보고 과정에서는 원본을 복구·수정하지 않습니다.
 - 공통 집계는 같은 입력·gold·라벨·조각·LLM 설정을 요구합니다. 4·5번은 정확히 같은 BioLORD 점수 파일이어야 합니다. Replay에는 검증된 원본 live run도 필요합니다.
 - `LLM_SERVER_ID`와 해시는 저장 기록의 혼용을 검출합니다. 실제 가중치 파일·과거 서버의 동일성을 자동 입증하는 기능은 아닙니다.
+- 점수의 `embedding_device`는 요청 장치 문자열이고 `cuda:0`만으로 물리 GPU를 구별할 수 없습니다. CLI 보정·집계는 세 점수의 CPU/GPU 혼용을 자동 차단하지 않으므로 실행 문서에서 장치·UUID를 고정하고 선택 기록 및 세 파일을 대조합니다. `settings.sh`는 최종 선택 후 재개용 설정을 보존합니다.
 - `check-baselines`와 `run --baseline-summary`는 과거 요약에 기록된 설정을 대조하는 선택 기능입니다. `report --baseline-summary`는 선택 CSV까지 읽어 ID·편수·기존 품질 값과 대조합니다. 지정한 원본이 누락되거나 충돌하면 미측정으로 숨기지 않고 거부합니다. 이번 실행의 필수 입력은 아닙니다.
 
 </details>
@@ -240,7 +245,7 @@ additional_fn = len(tp4 - tp5)
 
 ### 실행시간
 
-시간은 **test score 명령의 외부 wall time + live run 명령의 외부 wall time**으로 비교합니다. 4·5번에는 공유한 BioLORD test score 시간 1회분을 각각 포함합니다. 새 실행끼리는 같은 CPU/GPU·cache 절차를 쓰며, 과거와 조건을 확인하지 못하면 과거 시간은 참고값입니다. [시간 읽기와 주의점](NEGATIVE_PRUNING_RUNBOOK.ko.md#시간과-순위-확인)에서 파일명과 명령을 확인하세요.
+시간은 **test score 명령의 외부 wall time + live run 명령의 외부 wall time**으로 비교합니다. CPU/GPU 어느 쪽이든 임베딩 계산을 포함하고, GPU 사전 시험은 별도 준비 비용입니다. 4·5번에는 공유한 BioLORD test score 시간 1회분을 각각 포함합니다. 새 실행끼리는 같은 CPU/GPU·cache 절차를 쓰며, 과거와 조건을 확인하지 못하면 과거 시간은 참고값입니다. [시간 읽기와 주의점](NEGATIVE_PRUNING_RUNBOOK.ko.md#시간과-순위-확인)에서 파일명과 명령을 확인하세요.
 
 <details>
 <summary>내부 시간과 외부 시간을 구분하기</summary>
