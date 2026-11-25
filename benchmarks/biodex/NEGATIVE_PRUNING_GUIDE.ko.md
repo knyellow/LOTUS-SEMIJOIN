@@ -293,7 +293,7 @@ Linux Bash 기준이다. **실제 LLM 평가 순서는 3번 run → 4번 run →
 | LLM 설정 | 같은 paper 질문, temperature 0, 출력 최대 256토큰, `LLM_BATCH=8`, `EARLY_WORKERS=8` |
 | 서버 설정 | 과거 실행 인자는 `-ngl 99 -c 65536 --parallel 8 -fa on -ctk q8_0 -ctv q8_0 --no-jinja --chat-template llama3`. 현 서비스의 설정을 대조하는 참고 기록 |
 | 논문·라벨 | BioDEX test 앞 250편, 본문 앞 8,000자, 같은 순서의 간 라벨 10개와 정답 양성 10편 |
-| Proxy 장치 | `EMBED_DEVICE=cpu` 또는 `cuda`. 세 실험에서 같은 장치를 사용 |
+| Proxy 장치 | **`EMBED_DEVICE=cpu`로 고정**. E5 test와 BioLORD test·validation 모두 CPU 사용. 70B LLM은 GPU 사용 |
 | 저장 경로 | 새 비교 디렉터리 `R`. experiment3/4/5 폴더는 실행기가 생성 |
 
 `hosted_vllm/`은 LiteLLM의 OpenAI 호환 서버 연결 이름이다. 서버 운영 설정에서 70B 가중치를 확인한 후 해당 서비스의 실제 모델 ID를 사용한다. 코드의 일반 기본값은 8B이므로 이 가이드에서는 모델을 명시한다. Alias만으로 같은 가중치를 입증할 수 없고, 과거의 dataset revision과 llama.cpp 빌드 커밋은 미확인이다.
@@ -317,7 +317,9 @@ PY
 cd benchmarks/biodex
 ```
 
-`cuda` 임베딩은 CUDA 지원 PyTorch와 여유 VRAM이 있을 때만 사용한다. LLM이 GPU에서 실행돼도 proxy는 CPU로 계산할 수 있다. 기존 LLM 서비스와 GPU 메모리가 겹치면 proxy를 CPU나 다른 GPU에서 계산한다. 기존 서비스의 중지·재시작이 필요한 경우에는 서버의 원래 운영 절차만 사용한다. 모델 다운로드를 포함한 cold 비용과 캐시가 준비된 비용도 구분한다.
+이번 비교의 proxy 임베딩은 **CPU로 통일**한다. 같은 모델·입력·정밀도 설정에서 CPU를 선택하는 것은 모델을 축소하거나 양자화하는 변경이 아니다. CPU 때문에 표현 품질이 낮아진다고 가정할 근거는 없지만, CPU와 GPU의 부동소수점 계산값이 완전히 같다는 보장은 없다. 작은 수치 차이가 동점에 가까운 순서나 threshold 경계에 영향을 줄 수 있으므로 calibration과 test를 모두 CPU에서 생성한다. [PyTorch 수치 정확도 설명](https://docs.pytorch.org/docs/stable/notes/numerical_accuracy.html)
+
+70B LLM은 기존 GPU 서비스에서 실행한다. 임베딩을 위해 LLM의 가중치·양자화·동시성·context 설정을 바꾸지 않는다. 모델 다운로드를 포함한 cold 비용과 캐시가 준비된 비용도 구분한다.
 
 새 환경을 CI와 같은 의존성 버전으로 맞추려면 저장소 루트에서 `python -m pip install uv`, `uv export --locked --no-emit-project --no-hashes --all-extras -o /tmp/lotus-constraints.txt`, `uv pip install --python "$(command -v python)" -e . datasets --constraint /tmp/lotus-constraints.txt`를 사용한다. 기존 환경을 사용할 때에는 설치된 버전을 기록한다.
 
@@ -339,7 +341,7 @@ case "$LLM_MODEL" in
 esac
 export LLM_BATCH=8
 export EARLY_WORKERS=8
-export EMBED_DEVICE="${EMBED_DEVICE:-cpu}"
+export EMBED_DEVICE=cpu
 export SERVER_CACHE_POLICY="${SERVER_CACHE_POLICY:-existing_server_initial_kv_uncontrolled}"
 export BENCHMARK_DIR="$(pwd)"
 export R="$(pwd)/pruning_results/${REACTION_SET}_${PROMPT}_$(date +%Y%m%d_%H%M%S)"
@@ -532,6 +534,7 @@ e5, bio, validation, calibration = map(read, ['test_e5.json', 'test_biolord.json
 for key in ['input_sha256', 'chunks_sha256', 'reactions']:
     assert e5[key] == bio[key], key
 assert e5['scorer']['chunking'] == bio['scorer']['chunking']
+assert all(scores['embedding_device'] == 'cpu' for scores in (e5, bio, validation))
 assert bio['scorer'] == validation['scorer'] == calibration['scorer']
 assert bio['reactions'] == calibration['reactions']
 assert len(e5['articles']) == len(bio['articles']) == int(os.environ['N_ARTICLES'])

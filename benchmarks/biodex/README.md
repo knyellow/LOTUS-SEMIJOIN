@@ -45,6 +45,8 @@ You can find example results I ran earlier in biodex_results/Mar-17-25, which ga
 
 서버의 실제 70B 모델 ID로 `LLM_MODEL=hosted_vllm/<실제 ID>`를 지정하고 `LLM_BATCH=8`, `EARLY_WORKERS=8`을 사용합니다. 일반 코드 기본값은 8B입니다. 가이드의 명령은 기존 OpenAI 호환 서비스에 연결하며 모델 서버를 기동하지 않습니다. [서버 준비와 실험별 전체 명령](NEGATIVE_PRUNING_GUIDE.ko.md#11-서버-명령-3--4--5-순서대로)
 
+**70B LLM은 GPU, E5·BioLORD 임베딩은 CPU(`EMBED_DEVICE=cpu`)로 고정**합니다. Test·validation에 같은 장치를 사용하며, 모델·정밀도·정규화 설정은 유지합니다. CPU 선택 자체가 모델 품질을 낮추는 변경은 아니지만 CPU/GPU 수치의 완전한 일치를 보장하지는 않습니다.
+
 Proxy는 abstract 전체를 두 tokenizer에서 모두 128토큰 이내인 동일한 조각으로 나누며, 논문–라벨 점수는 조각별 cosine similarity의 최대입니다. E5는 문서 `passage: `·라벨 `query: ` 접두어를 쓰고 BioLORD는 접두어 없이 씁니다. **LLM 입력은 기존 `fulltext_processed[:8000]`**입니다. 빈 abstract·무효 embedding은 원래 순서로 평가하고 pruning하지 않습니다.
 
 3·4번에는 threshold를 넣지 않습니다. 5번의 threshold는 validation의 정답과 점수만으로 정해 추가 LLM 호출이 없으며 4번 test 결과 전에 고정합니다. `conservative`를 주 조건, `retain_95`를 보조 조건으로 보고합니다. Validation 보존율이 test의 무누락을 보장하지는 않습니다.
