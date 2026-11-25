@@ -152,15 +152,14 @@ For more, you can checkout the official [docs](https://lotus-ai.readthedocs.io/e
 
 ## BioDEX semi-join experiments (팀 프로젝트)
 
-[한국어 코드 설명과 서버 실행 명령](benchmarks/biodex/NEGATIVE_PRUNING_GUIDE.ko.md)
+기존 조기 종료 실행기에 E5·BioLORD의 라벨 정렬과 논문 단위 negative pruning을 연결합니다. 임베딩은 CPU, 70B LLM 판정은 GPU에서 수행하며, 같은 초록 조각과 기존 본문 앞 8,000자 입력을 사용합니다. 새 실측은 3→4→5 각 1회입니다.
 
-| 실험 | Proxy | Negative pruning |
-|---|---|---|
-| 3 | E5-base-v2 | 없음 |
-| 4 | BioLORD-2023 | 없음 |
-| 5 | BioLORD-2023 | Validation에서 정한 threshold 적용 |
-
-세 실험은 같은 abstract 조각을 임베딩하고 라벨별 최대 cosine similarity 순서로 기존 조기 종료를 실행합니다. LLM 입력은 기존 본문 앞 8,000자를 유지합니다. 4·5번은 같은 BioLORD 점수 파일을 사용하며, 완료된 4번으로 두 threshold의 호출 수·F1을 추가 LLM 호출 없이 재생할 수 있습니다. 실제 실행시간은 5번을 별도로 실행해 측정합니다.
+| 읽을 문서 | 확인할 내용 |
+|---|---|
+| [실험 개요](benchmarks/biodex/README.md) | 비교할 세 방법과 확정한 범위 |
+| [서버 실행 절차](benchmarks/biodex/NEGATIVE_PRUNING_RUNBOOK.ko.md) | 준비·실행·집계·시간 확인·재개 명령 |
+| [코드와 설계 설명](benchmarks/biodex/NEGATIVE_PRUNING_GUIDE.ko.md) | 구현 흐름, 선택 이유, 지표 해석 |
+| [기존 70B 기록](benchmarks/biodex/HISTORICAL_70B_RESULTS.ko.md) | 과거 1·2번 수치의 출처와 비교 한계 |
 
 ## Community
 Join us on [Discord][#discord] to ask questions and share what you're building.
