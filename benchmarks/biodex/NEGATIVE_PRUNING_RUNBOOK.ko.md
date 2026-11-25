@@ -338,6 +338,8 @@ declare -f gpu_in_current_allocation check_embedding_context >> "$R/settings.sh"
 
 먼저 선택한 장치에서 E5 test 점수를 만들고 이 명령의 경과시간을 저장합니다. 세 score 명령의 장치 마스크는 임베딩 프로세스에만 적용합니다.
 
+각 score 명령은 점수 JSON 저장 후 null 점수 총개수·영향받은 논문 수·`_qid` 목록을 한 줄로 출력합니다. E5 test는 `test_e5_score.log`, BioLORD test는 `test_biolord_score.log`, validation은 `validation_biolord.log`에서 `null_scores=`를 찾으세요. 0개여도 요약을 출력하며, 빈 초록의 null도 집계합니다. 기존 원래 순서 평가·조기 종료·pruning 규칙은 유지합니다.
+
 ```bash
 fresh "$R/test_e5.json" "$R/test_e5_score_wall_s.txt" "$R/test_e5_score.log"
 check_embedding_context

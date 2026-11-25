@@ -289,6 +289,9 @@ def make_scores(args) -> None:
             "articles": rows,
         },
     )
+    null_qids = [row["_qid"] for row in rows if any(score is None for score in row["scores"])]
+    null_scores = sum(score is None for row in rows for score in row["scores"])
+    print(f"null_scores={null_scores}, affected_articles={len(null_qids)}, qids={null_qids}", flush=True)
 
 
 def calibrate(scores: dict, target: float) -> dict:

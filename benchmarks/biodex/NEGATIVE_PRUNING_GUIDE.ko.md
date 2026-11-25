@@ -108,6 +108,8 @@ similarities[index] = chunk_scores[offset:stop].max(axis=0)
 
 `offset:stop`은 현재 논문의 조각 범위이고 `axis=0`은 같은 라벨의 최대를 뜻합니다. 실제 코드는 이 집계 전에 NaN·무한대·영벡터를 검사합니다. 중요한 조각의 근거가 빠질 수 있으므로 한 조각이라도 무효이면 해당 논문의 proxy를 신뢰하지 않습니다. 빈 초록·무효 점수는 원래 라벨 순서로 평가하고 pruning하지 않습니다. JSON의 `null`은 사용할 수 없는 점수입니다.
 
+점수 JSON 저장에 성공하면 `null_scores=20, affected_articles=2, qids=[7, 18]` 형태로 한 줄을 출력합니다. `null_scores`는 라벨별 사용 불가 점수의 총개수, `affected_articles`와 `qids`는 그 점수가 하나라도 있는 논문 수와 행 번호입니다. 빈 초록에서 생긴 null도 포함하며, 0개이면 `null_scores=0, affected_articles=0, qids=[]`를 출력합니다. 점수 파일 형식과 무효 점수 처리 규칙은 바꾸지 않습니다.
+
 모델 revision·정규화·접두어·조각 정책·tokenizer 내용을 기록합니다. `input_sha256`은 논문 ID·본문·초록·정답을, `chunks_sha256`은 원문 조각 목록을 묶습니다. Tokenizer 해시에서는 배칭 중 변하는 padding·truncation 상태를 제외합니다.
 
 </details>

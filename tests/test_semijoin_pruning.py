@@ -509,13 +509,14 @@ class TestSemijoinPruning(unittest.TestCase):
                             )
                         ),
                     },
-                ):
+                ), contextlib.redirect_stdout(io.StringIO()) as score_log:
                     pruning.make_scores(
                         SimpleNamespace(
                             model=model, n_articles=None, split="validation", device="cpu", output=root / "scores.json"
                         )
                     )
                 scores = pruning.load_scores(root / "scores.json")
+                self.assertEqual(score_log.getvalue().strip(), "null_scores=4, affected_articles=2, qids=[1, 2]")
                 self.assertEqual(rm.call_count, 2)
                 self.assertEqual(rm.call_args_list[0].args[0], label_texts)
                 self.assertEqual(scores["articles"][0]["scores"], [1.0, 1.0])
