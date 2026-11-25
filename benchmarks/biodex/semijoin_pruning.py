@@ -698,8 +698,13 @@ def report(args) -> None:
             "endpoint_sha256", "llm_server_id")
     if live and any(any(m.get(key) != live[0][0].get(key) for key in keys) for m, *_ in live):
         raise ValueError("Live runs use different LLM, prompt, server, or execution settings.")
-    if len({m["scores_sha256"] for m, *_ in live if m["experiment"] in (4, 5)}) > 1:
-        raise ValueError("Experiments 4 and 5 must reuse exactly the same BioLORD score file.")
+    # Compare independent BioLORD computations after completed_run verifies each original file.
+    biolord_digests = {
+        digest({key: value for key, value in scores.items() if key != "embedding_time_s"})
+        for manifest, _, _, _, scores in live if manifest["experiment"] in (4, 5)
+    }
+    if len(biolord_digests) > 1:
+        raise ValueError("Experiments 4 and 5 require identical BioLORD score files apart from embedding_time_s.")
     summaries = [read_json(path) for path in args.baseline_summary]
 
     def recorded_value(key, values):

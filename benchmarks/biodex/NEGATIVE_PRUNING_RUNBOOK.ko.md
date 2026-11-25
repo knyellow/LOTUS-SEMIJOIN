@@ -1,6 +1,6 @@
 # BioDEX 실험 3·4·5 서버 실행 절차
 
-Linux Bash에서 아래 순서로 실행합니다. **70B GPU 서비스에서 3번, 4번, 5번을 각각 한 번 실측합니다.** 임베딩은 사전 점검을 통과한 GPU 한 장을 우선 사용하고, 사용할 GPU가 없거나 시험에 실패하면 CPU를 사용합니다. **3번 시작 전에 한 번 결정해 E5 test·BioLORD test·validation에 같은 장치를 유지합니다.** 5번은 4번의 판정으로 두 정책을 먼저 재생한 뒤 보수적 정책만 실측합니다.
+Linux Bash에서 아래 순서로 실행합니다. **70B GPU 서비스에서 3번, 4번, 5번을 각각 한 번 실측합니다.** 임베딩은 사전 점검을 통과한 GPU 한 장을 우선 사용하고, 사용할 GPU가 없거나 시험에 실패하면 CPU를 사용합니다. **3번 시작 전에 한 번 결정해 네 번의 score 계산에 같은 장치를 유지합니다.** 3·4·5번은 점수 생성부터 각각 독립 실행하며, 5번은 validation 계산·threshold 보정 비용까지 포함합니다. 두 replay는 실측을 마친 뒤 별도로 계산합니다.
 
 과거 실험 1·2번은 보고된 호출 수·논문 단위 F1·외부 시간을 별도로 인용합니다. 원본 요약이나 선택 CSV 없이 이 절차를 진행할 수 있습니다. 과거와 현재의 GPU·서버·캐시 조건을 확인하기 어려우면, 같은 환경에서 실행한 3~5번을 주 시간 비교로 사용합니다. [과거 결과와 출처](HISTORICAL_70B_RESULTS.ko.md) · [실험 설계와 지표](NEGATIVE_PRUNING_GUIDE.ko.md)
 
@@ -15,7 +15,9 @@ Linux Bash에서 아래 순서로 실행합니다. **70B GPU 서비스에서 3�
 | GPU·모델 | 과거 기준은 V100 16GB 4장, `bartowski/Meta-Llama-3.1-70B-Instruct-GGUF`의 `Q4_K_M`입니다. 현재 서비스의 가중치·GPU·시작 설정을 대조해 차이를 기록합니다. |
 | LLM 판정 | `PROMPT=paper`, 온도 0, 출력 최대 256토큰, `LLM_BATCH=8`, `EARLY_WORKERS=8`입니다. 시작 로그에서 슬롯당 context가 본문과 프롬프트·출력을 수용하는지 확인합니다. |
 | 데이터 | BioDEX test 앞 250편, 본문 앞 8,000자, 간 라벨 10개를 사용합니다. Validation 전체는 5번의 임계값 보정에 사용합니다. |
-| 점수 계산 | 아래 사전 시험 후 `EMBED_DEVICE=cpu` 또는 `cuda:0`을 고정합니다. GPU이면 세 점수 명령에 같은 물리 GPU UUID를 지정합니다. 70B 서비스의 GPU 배정·설정은 유지합니다. |
+| 점수 계산 | 아래 사전 시험 후 `EMBED_DEVICE=cpu` 또는 `cuda:0`을 고정합니다. E5 test 1회, BioLORD test 2회·validation 1회에 같은 장치·물리 GPU UUID를 사용하며 70B 설정은 유지합니다. |
+
+**정책은 실행 전에 고정합니다.** Validation 양성 100% 보존(`conservative`)을 주 조건, 최소 95% 보존(`retain_95`)을 보조 조건으로 사용하고 실제 5번은 conservative 한 번만 실행합니다. 수치 threshold는 5번에서 validation만으로 계산하며, 4번 test 결과로 규칙을 바꾸지 않습니다.
 
 팀원이 알려준 V100 8장은 서버에 설치된 수량이며, 과거 기록의 70B 사용 GPU 4장과 구분합니다. 실제 배정·사용 장수와 장당 VRAM을 확인합니다. RAM 48/96GB라는 설명만으로 GPU 여유를 판단하지 않습니다. 임베딩을 위해 70B를 다른 GPU에 재배치하지 않습니다.
 
@@ -332,120 +334,63 @@ done >> "$R/settings.sh"
 declare -f gpu_in_current_allocation check_embedding_context >> "$R/settings.sh"
 ```
 
-`cuda:0`은 원래 작업의 가시 목록에서 전체 UUID를 확인한 뒤, 후보 한 장만 보이게 한 **해당 임베딩 자식 프로세스의 번호**입니다. UUID를 식별할 수 없는 환경이면 CPU로 진행합니다. 70B 서버나 현재 셸의 GPU 가시성을 바꾸지 않습니다. CPU이면 임베딩 자식 프로세스에만 GPU를 숨깁니다. 선택 이후에는 장치·UUID·정밀도를 바꾸거나 점수 파일을 CPU/GPU 사이에 섞지 않습니다. 장치 선택 단계가 중단되어 시험 로그가 남았다면 보존하고 새 `R`에서 준비합니다. 본 점수 생성 중 GPU 오류가 나면 그대로 중단하고 원인을 확인합니다. 3번 이후 CPU로 바꿔야 한다면 기존 결과를 보존하고 새 `R`에서 전체 비교를 다시 준비해야 하므로 추가 live 실행 전 팀에 알립니다.
+`cuda:0`은 원래 작업의 가시 목록에서 전체 UUID를 확인한 뒤, 후보 한 장만 보이게 한 **해당 임베딩 자식 프로세스의 번호**입니다. UUID를 식별할 수 없는 환경이면 CPU로 진행합니다. 70B 서버나 현재 셸의 GPU 가시성을 바꾸지 않습니다. CPU이면 임베딩 자식 프로세스에만 GPU를 숨깁니다. 선택 이후에는 네 score 계산의 장치·UUID·정밀도를 바꾸거나 점수 파일을 CPU/GPU 사이에 섞지 않습니다. 장치 선택 단계가 중단되어 시험 로그가 남았다면 보존하고 새 `R`에서 준비합니다. 본 점수 생성 중 GPU 오류가 나면 그대로 중단하고 원인을 확인합니다. 3번 이후 CPU로 바꿔야 한다면 기존 결과를 보존하고 새 `R`에서 전체 비교를 다시 준비해야 하므로 추가 live 실행 전 팀에 알립니다.
 
-## 실험 3 E5 정렬
+## 실험별 전체 실행과 시간
 
-먼저 선택한 장치에서 E5 test 점수를 만들고 이 명령의 경과시간을 저장합니다. 세 score 명령의 장치 마스크는 임베딩 프로세스에만 적용합니다.
+[run_semijoin_experiment.sh](run_semijoin_experiment.sh)가 아래 명령을 차례로 실행합니다. **기동된 70B 서버와 다운로드된 데이터·가중치 파일이 있는 조건**에서, 각 방법에 필요한 계산·프로세스 시작·입출력·묶음 내부 검증을 포함해 한 번의 외부 타이머로 측정합니다. 점수·단계 파일을 다른 실험에서 가져오지 않습니다.
 
-각 score 명령은 점수 JSON 저장 후 null 점수 총개수·영향받은 논문 수·`_qid` 목록을 한 줄로 출력합니다. E5 test는 `test_e5_score.log`, BioLORD test는 `test_biolord_score.log`, validation은 `validation_biolord.log`에서 `null_scores=`를 찾으세요. 0개여도 요약을 출력하며, 빈 초록의 null도 집계합니다. 기존 원래 순서 평가·조기 종료·pruning 규칙은 유지합니다.
+| 실험 | 한 타이머에 포함되는 순서 |
+|---|---|
+| 3 | E5 test 점수 생성 → 기존 조기 종료 LLM 평가 |
+| 4 | BioLORD test 점수 생성 → 기존 조기 종료 LLM 평가 |
+| 5 | BioLORD validation 점수 생성 → 두 threshold 보정 → **자체 BioLORD test 점수 생성** → conservative pruning·LLM 평가 |
+
+실행기는 Linux의 Bash·GNU `/usr/bin/time`·`setsid`를 사용합니다. 먼저 기존 출력 충돌을 검사하고 전용 workflow 폴더를 생성합니다. 70B 연결 점검과 GPU 할당 확인은 타이머 밖에서 하고, 측정 중 실패하면 뒤 단계를 실행하지 않습니다. 상태가 `complete`, 종료 코드가 0이며 모든 단계가 새로 완료된 경우에만 전체 시간을 사용합니다. 실행기는 `settings.sh`와 최초 장치 선택 기록도 대조합니다.
+
+### 실험 3 E5 정렬
 
 ```bash
-fresh "$R/test_e5.json" "$R/test_e5_score_wall_s.txt" "$R/test_e5_score.log"
-check_embedding_context
-/usr/bin/time -f '%e' -o "$R/test_e5_score_wall_s.txt" \
-  env CUDA_VISIBLE_DEVICES="$EMBED_GPU_UUID" python semijoin_pruning.py score --model e5 --split test --n-articles "$N_ARTICLES" \
-  --device "$EMBED_DEVICE" --output "$R/test_e5.json" > "$R/test_e5_score.log" 2>&1
+bash run_semijoin_experiment.sh 3 "$R"
+cat "$R/experiment3_workflow/status.json"
 ```
 
-LLM을 호출하기 전에 0부터 시작하는 test 행 번호, 양성 10편의 인덱스, 간 라벨 순서를 과거 기록과 대조합니다. 대조가 실패하면 먼저 입력을 확인합니다. 일치하더라도 과거 250편의 원문 전체와 데이터 revision까지 식별되는 것은 아닙니다.
+`test_e5.json`을 만들고 3번을 실행합니다. `experiment3/summary.json`·`articles.json`이 생성돼야 합니다. 실행기는 LLM 평가 전에 250편·liver 라벨 순서·과거 양성 10개 행 번호·장치를 확인합니다. 행 번호가 같아도 과거 원문·revision까지 같다는 증명은 아닙니다.
+
+### 실험 4 BioLORD 정렬
 
 ```bash
-python - "$R/test_e5.json" <<'PY'
-import json, os, sys
-from pathlib import Path
-scores = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-rows = scores['articles']
-assert scores['embedding_device'] == os.environ['EMBED_DEVICE']
-assert scores['split'] == 'test' and [row['_qid'] for row in rows] == list(range(250))
-assert [row['_qid'] for row in rows if row['gold_matches']] == [29, 119, 134, 143, 148, 153, 158, 167, 198, 223]
-assert scores['reactions'] == [
-    'Drug-induced liver injury', 'Hepatic function abnormal', 'Hepatotoxicity', 'Liver injury',
-    'Hepatic failure', 'Hepatic enzyme increased', 'Acute hepatic failure', 'Hepatitis',
-    'Immune-mediated hepatitis', 'Hepatic necrosis',
-]
-print('250 test rows, 10 historical gold-positive indices and ordered liver panel match')
-PY
+bash run_semijoin_experiment.sh 4 "$R"
+cat "$R/experiment4_workflow/status.json"
 ```
 
-연결 점검 후 E5 순서로 조기 종료를 수행합니다. 3번에는 임계값을 지정하지 않습니다. `summary.json`과 `articles.json`이 생성되면 4번으로 넘어갑니다.
+**4번은 BioLORD test 점수 생성과 LLM 평가만 수행합니다.** Validation 임베딩과 threshold 계산은 하지 않습니다. `test_biolord.json`과 `experiment4/` 결과를 보존합니다.
+
+### 실험 5 pruning
 
 ```bash
-preflight experiment3
-fresh "$R/experiment3" "$R/experiment3_wall_s.txt" "$R/experiment3.log"
-/usr/bin/time -f '%e' -o "$R/experiment3_wall_s.txt" \
-  python semijoin_pruning.py run "$R/test_e5.json" --experiment 3 \
-  --output-dir "$R/experiment3" > "$R/experiment3.log" 2>&1
-test -s "$R/experiment3/summary.json"
-test -s "$R/experiment3/articles.json"
+bash run_semijoin_experiment.sh 5 "$R"
+cat "$R/experiment5_conservative_workflow/status.json"
 ```
 
-## 실험 4 BioLORD 정렬
+5번은 `validation_biolord.json` → `thresholds.json` → `test_biolord_exp5.json` → `experiment5_conservative/`를 독립 생성합니다. **4번 점수나 LLM 판정을 실행 입력으로 사용하지 않습니다.** 기존 초록·128토큰 조각·모델·정밀도·장치 정책을 그대로 사용합니다. Validation 전체의 임베딩과 파일 저장, 보정 명령의 시작부터 종료까지도 5번 전체 시간에 포함됩니다.
 
-3번과 같은 장치·GPU UUID에서 BioLORD test·validation 점수를 만듭니다. 아래 검사는 두 모델의 test 입력·조각·라벨 일치와 세 점수 파일의 장치가 선택값과 같은지 확인합니다. 검사를 통과한 뒤 **4번의 test LLM 판정을 보기 전에** validation의 정답과 점수로 5번의 두 임계값을 고정합니다. 불일치 시 기존 점수를 보존하고 입력·모델·장치 설정을 확인합니다.
+5번 live는 conservative 한 번입니다. 보조 retain_95의 실제 시간은 미측정이며 아래 replay로 품질·논리 호출 수만 확인합니다. 모두 pruning이면 `articles.json`·`summary.json`은 생성되지만 `progress.jsonl`은 없어도 정상입니다.
 
-```bash
-test -s "$R/experiment3/summary.json"
-fresh "$R/test_biolord.json" "$R/test_biolord_score_wall_s.txt" "$R/test_biolord_score.log"
-check_embedding_context
-/usr/bin/time -f '%e' -o "$R/test_biolord_score_wall_s.txt" \
-  env CUDA_VISIBLE_DEVICES="$EMBED_GPU_UUID" python semijoin_pruning.py score --model biolord --split test --n-articles "$N_ARTICLES" \
-  --device "$EMBED_DEVICE" --output "$R/test_biolord.json" > "$R/test_biolord_score.log" 2>&1
-fresh "$R/validation_biolord.json" "$R/validation_biolord_wall_s.txt" "$R/validation_biolord.log"
-check_embedding_context
-/usr/bin/time -f '%e' -o "$R/validation_biolord_wall_s.txt" \
-  env CUDA_VISIBLE_DEVICES="$EMBED_GPU_UUID" python semijoin_pruning.py score --model biolord --split validation --device "$EMBED_DEVICE" \
-  --output "$R/validation_biolord.json" > "$R/validation_biolord.log" 2>&1
-python - <<'PY'
-import json, os
-from pathlib import Path
-root = Path(os.environ['R'])
-read = lambda name: json.loads((root / name).read_text(encoding='utf-8'))
-e5, bio, validation = map(read, ['test_e5.json', 'test_biolord.json', 'validation_biolord.json'])
-for key in ['input_sha256', 'chunks_sha256', 'reactions']:
-    assert e5[key] == bio[key], key
-assert e5['scorer']['chunking'] == bio['scorer']['chunking']
-assert all(scores['embedding_device'] == os.environ['EMBED_DEVICE'] for scores in (e5, bio, validation))
-assert read('embedding-choice.json')['EMBED_DEVICE'] == os.environ['EMBED_DEVICE']
-assert read('embedding-choice.json')['EMBED_GPU_UUID'] == os.environ['EMBED_GPU_UUID']
-assert bio['scorer'] == validation['scorer']
-assert bio['reactions'] == validation['reactions']
-assert len(e5['articles']) == len(bio['articles']) == int(os.environ['N_ARTICLES'])
-print('Shared abstracts/chunks/panel/device OK')
-PY
-fresh "$R/thresholds.json"
-python semijoin_pruning.py calibrate "$R/validation_biolord.json" --output "$R/thresholds.json"
-python - <<'PY'
-import json, os
-from pathlib import Path
-root = Path(os.environ['R'])
-validation = json.loads((root / 'validation_biolord.json').read_text(encoding='utf-8'))
-calibration = json.loads((root / 'thresholds.json').read_text(encoding='utf-8'))
-assert calibration['scorer'] == validation['scorer']
-assert calibration['reactions'] == validation['reactions']
-assert calibration['validation_input_sha256'] == validation['input_sha256']
-print(json.dumps(calibration['policies'], indent=2))
-PY
-```
+| score 파일 | 생성 단계 | null 점수 요약 로그 |
+|---|---|---|
+| `test_e5.json` | 3번 | `test_e5_score.log` |
+| `test_biolord.json` | 4번 | `test_biolord_score.log` |
+| `validation_biolord.json` | 5번 | `validation_biolord.log` |
+| `test_biolord_exp5.json` | 5번 | `test_biolord_exp5_score.log` |
 
-같은 LLM 설정에서 BioLORD 순서로 조기 종료를 수행합니다. 4번에도 임계값을 지정하지 않습니다. 완료된 결과와 BioLORD 점수 파일을 그대로 5번에서 사용합니다.
+각 로그의 `null_scores=`에서 null 총개수·영향 논문 수·행 번호를 읽습니다. 빈 초록의 null도 포함하고 0개여도 0/0/[]를 출력합니다. 원래 순서 평가·조기 종료·pruning 규칙은 바꾸지 않습니다.
+
+## 실측 후 두 정책 replay
+
+**다음은 모든 실측 타이머 밖에서 수행하는 분석입니다.** 4번의 원본 점수·완료 판정에 5번에서 만든 두 threshold를 적용합니다. 추가 LLM 호출은 없으며 replay의 `lm_calls`는 정책을 적용했을 때의 예상 논리 호출 수입니다.
 
 ```bash
-preflight experiment4
-fresh "$R/experiment4" "$R/experiment4_wall_s.txt" "$R/experiment4.log"
-/usr/bin/time -f '%e' -o "$R/experiment4_wall_s.txt" \
-  python semijoin_pruning.py run "$R/test_biolord.json" --experiment 4 \
-  --output-dir "$R/experiment4" > "$R/experiment4.log" 2>&1
-test -s "$R/experiment4/summary.json"
-test -s "$R/experiment4/articles.json"
-```
-
-## 실험 5 pruning
-
-먼저 4번의 완료 기록을 바탕으로 `conservative`와 `retain_95`를 각각 재생합니다. 두 파일은 정책별 호출 수와 품질을 비교하는 데 쓰며 추가 LLM 호출은 없습니다.
-
-```bash
-test -s "$R/experiment4/summary.json"
 fresh "$R/experiment5_conservative_replay.json" "$R/experiment5_retain95_replay.json"
 python semijoin_pruning.py replay "$R/test_biolord.json" \
   --calibration "$R/thresholds.json" --policy conservative \
@@ -455,85 +400,108 @@ python semijoin_pruning.py replay "$R/test_biolord.json" \
   --source-dir "$R/experiment4" --output "$R/experiment5_retain95_replay.json"
 ```
 
-실제 시간은 사전에 정한 보수적 정책 `conservative`로 한 번 측정합니다. 4번과 동일한 BioLORD 점수 파일, 고정한 validation 임계값을 사용합니다.
-
-```bash
-preflight experiment5_conservative
-fresh "$R/experiment5_conservative" "$R/experiment5_conservative_wall_s.txt" "$R/experiment5_conservative.log"
-/usr/bin/time -f '%e' -o "$R/experiment5_conservative_wall_s.txt" \
-  python semijoin_pruning.py run "$R/test_biolord.json" --experiment 5 \
-  --calibration "$R/thresholds.json" --policy conservative \
-  --output-dir "$R/experiment5_conservative" > "$R/experiment5_conservative.log" 2>&1
-test -s "$R/experiment5_conservative/summary.json"
-test -s "$R/experiment5_conservative/articles.json"
-```
-
-모두 생략된 경우에도 `articles.json`과 `summary.json`이 만들어집니다. 이 경우 `progress.jsonl`이 없어도 정상입니다. `retain_95`의 실제 실행시간은 미측정으로 표시합니다.
-
 ## 품질 집계
 
-아래 명령에 실측 세 건과 4번을 원본으로 한 replay 두 건을 전달합니다. 각 실측 폴더에는 해당 실행에서 사용한 점수 파일을 짝지어 줍니다. 집계에는 LLM 호출이 없습니다.
+실측마다 **그 실행이 만든 원본 점수 파일**을 짝지어 줍니다. 5번에는 `test_biolord_exp5.json`, 4번과 그 replay에는 `test_biolord.json`을 사용합니다. 집계 중 LLM 호출은 없습니다.
 
 ```bash
 fresh "$R/comparison.json"
 python semijoin_pruning.py report --scores "$R/test_biolord.json" \
   --run "$R/test_e5.json" "$R/experiment3" \
   --run "$R/test_biolord.json" "$R/experiment4" \
-  --run "$R/test_biolord.json" "$R/experiment5_conservative" \
+  --run "$R/test_biolord_exp5.json" "$R/experiment5_conservative" \
   --replay "$R/experiment5_conservative_replay.json" \
   --replay "$R/experiment5_retain95_replay.json" \
   --output "$R/comparison.json"
 ```
 
-`comparison.json`의 `results[].vs_labels`에서 논문 단위 TP·FP·FN과 정답 대비 precision·recall·F1을 읽습니다. `mode`와 `lm_calls_kind`로 실측 호출 수와 replay가 추정한 정책 비용을 구분합니다. **예상 결과는 `missing_experiments: [1, 2]`와 모든 행의 `vs_join_full: null`입니다.** 과거의 전체 선택 ID가 없어 1번과의 논문별 일치도를 계산할 수 없습니다.
+보고서는 3 live·2 replay 행이며 `missing_experiments=[1,2]`, `vs_join_full=null`이 정상입니다. 과거 선택 CSV가 없어 1번과의 논문별 일치도는 계산하지 않습니다. 논문 단위 TP·FP·FN·precision·recall·F1은 `results[].vs_labels`에서 읽습니다.
+
+각 live/replay는 자기 원본 점수 **전체 해시**를 검증합니다. 4·5번 간 비교에서는 독립 재계산으로 달라지는 `embedding_time_s`만 제외하고 입력·모델·조각·라벨·장치·실제 점수·gold가 같아야 합니다. 실제 점수가 미세하게라도 다르면 보고서가 거부합니다. 두 결과를 보존해 원인과 정렬·두 threshold의 gate 결정을 확인하세요. 허용 오차를 임의로 넣거나 5번 파일을 4번 파일로 바꿔 통과시키지 않습니다.
 
 ## 시간과 순위 확인
 
-같은 `R`에서 세 실측의 설정과 점수 식별자를 대조하고 각 방법의 호출 수, F1, recall, 정답 양성 논문의 첫 gold witness 평균 순위를 읽습니다. 재개한 실험은 전체 시간이 미측정으로 출력됩니다.
+주 시간은 **`실험명_workflow/total_wall_s.txt`**입니다. 각 단계의 `*_wall_s.txt`는 보조 정보입니다. 이들을 다시 더해 주 시간을 만들거나, validation·보정이 빠진 내부 추정 시간을 5번 전체 시간으로 사용하지 않습니다.
 
 ```bash
 python - <<'PY'
-import json, os
+import json, math, os
 from pathlib import Path
+from semijoin_pruning import digest, load_scores
 root = Path(os.environ['R'])
 read = lambda path: json.loads(path.read_text(encoding='utf-8'))
 names = ['experiment3', 'experiment4', 'experiment5_conservative']
-ms = [read(root / name / 'manifest.json') for name in names]
-assert all(m['model'] == os.environ['LLM_MODEL'] and m['workers'] == 8 and m['llm_batch'] == 8 for m in ms)
-assert all(m['max_tokens'] == 256 and m['temperature'] == 0 for m in ms)
-for key in ['model', 'instruction', 'max_tokens', 'temperature', 'workers', 'llm_batch', 'endpoint_sha256', 'llm_server_id']:
-    assert len({json.dumps(m[key], sort_keys=True) for m in ms}) == 1, key
-assert ms[1]['scores_sha256'] == ms[2]['scores_sha256']
-for name, score_time in zip(names, ['test_e5_score_wall_s.txt', 'test_biolord_score_wall_s.txt', 'test_biolord_score_wall_s.txt']):
-    summary = read(root / name / 'summary.json')
+phases = [
+    ['test_e5_score', 'experiment3'],
+    ['test_biolord_score', 'experiment4'],
+    ['validation_biolord', 'calibration', 'test_biolord_exp5_score', 'experiment5_conservative'],
+]
+completed = []
+for number, name, stages in zip([3, 4, 5], names, phases):
+    workflow = root / f'{name}_workflow'
+    status = read(workflow / 'status.json') if (workflow / 'status.json').exists() else {}
+    summary_path = root / name / 'summary.json'
+    if status.get('status') != 'complete' or status.get('exit_code') != 0 or not summary_path.exists():
+        print(name, 'overall wall: unavailable (failed, interrupted, or no completed workflow)')
+        continue
+    summary = read(summary_path)
+    if summary['resumed']:
+        print(name, 'overall wall: unavailable (resumed)')
+        continue
+    assert status['experiment'] == number
+    try:
+        total = float((workflow / 'total_wall_s.txt').read_text().strip())
+        stage_times = {p: float((root / f'{p}_wall_s.txt').read_text().strip()) for p in stages}
+    except (OSError, ValueError):
+        print(name, 'overall wall: unavailable (missing or invalid timer)')
+        continue
+    assert all(math.isfinite(t) and t >= 0 for t in [total, *stage_times.values()])
+    assert total + 0.1 >= sum(stage_times.values()), 'Outer timer may have been overwritten'
+    assert stage_times[name] + 0.1 >= summary['invocation_time_s']
     rows = read(root / name / 'articles.json')
     assert [r['_qid'] for r in rows if r['gold_positive']] == [29, 119, 134, 143, 148, 153, 158, 167, 198, 223]
     ranks = [r['first_gold_witness_rank'] for r in rows if r['gold_positive']]
     print(name, 'calls', summary['lm_calls'], 'F1', summary['f1'], 'recall', summary['recall'])
     print('mean first gold witness rank', sum(ranks) / len(ranks) if ranks else None)
-    if summary['resumed']:
-        print('test score + run wall: unavailable (resumed run)')
-        continue
-    score_wall = float((root / score_time).read_text().strip())
-    run_wall = float((root / f'{name}_wall_s.txt').read_text().strip())
-    assert run_wall + 0.1 >= summary['invocation_time_s'], 'Wall timer may have been overwritten by a completed rerun'
-    print('test score + run wall seconds', score_wall + run_wall)
+    print('overall wall seconds', total, 'stage wall seconds', stage_times)
+    completed.append(name)
+if completed == names:
+    ms = [read(root / name / 'manifest.json') for name in names]
+    assert all(m['model'] == os.environ['LLM_MODEL'] and m['workers'] == 8 and m['llm_batch'] == 8 for m in ms)
+    assert all(m['max_tokens'] == 256 and m['temperature'] == 0 for m in ms)
+    for key in ['model', 'instruction', 'max_tokens', 'temperature', 'workers', 'llm_batch', 'endpoint_sha256', 'llm_server_id']:
+        assert len({json.dumps(m[key], sort_keys=True) for m in ms}) == 1, key
+    scores = [load_scores(root / p) for p in ['test_e5.json', 'test_biolord.json', 'test_biolord_exp5.json']]
+    validation = load_scores(root / 'validation_biolord.json')
+    choice = read(root / 'embedding-choice.json')
+    for key in ['EMBED_DEVICE', 'EMBED_GPU_UUID', 'EMBED_HOST', 'EMBED_ORIGINAL_VISIBILITY']:
+        assert choice[key] == os.environ[key], key
+    assert all(s['embedding_device'] == os.environ['EMBED_DEVICE'] for s in [*scores, validation])
+    for key in ['input_sha256', 'chunks_sha256', 'reactions']:
+        assert len({digest(s[key]) for s in scores}) == 1, key
+    assert len({digest(s['scorer']['chunking']) for s in scores}) == 1
+    assert {k: v for k, v in scores[1].items() if k != 'embedding_time_s'} == {k: v for k, v in scores[2].items() if k != 'embedding_time_s'}
+    calibration = read(root / 'thresholds.json')
+    assert validation['scorer'] == scores[2]['scorer'] == calibration['scorer']
+    assert validation['reactions'] == scores[2]['reactions'] == calibration['reactions']
+    assert validation['input_sha256'] == calibration['validation_input_sha256']
+    print('Cross-experiment settings and score checks passed.')
+else:
+    print('Cross-experiment check: unavailable until all three fresh workflows complete.')
 PY
 ```
 
-| 방법 | Test 처리 시간 |
-|---|---|
-| 3번 | E5 test 점수 생성 시간 + 3번 실측 시간 |
-| 4번 | BioLORD test 점수 생성 시간 + 4번 실측 시간 |
-| 5번 실측 | 같은 BioLORD test 점수 생성 시간 + 5번 실측 시간 |
+5번 주 시간에는 validation 전체 임베딩·threshold 보정·자체 test 점수 생성·LLM 평가가 모두 포함됩니다. 전체 묶음에는 내부 검증·프로세스·입출력 비용도 있어 단계 시간의 합과 정확히 같지는 않습니다. Test-only 시간이나 사전 보정 비용을 제외한 반복 운영 비용을 보조 분석한다면 이름과 제외 범위를 별도로 명시합니다.
 
-위 합계는 두 명령을 각각 외부 타이머로 측정한 값입니다. **CPU/GPU 어느 장치든 test 임베딩 계산 비용을 포함합니다.** BioLORD test 점수는 한 번만 만들고, 각 방법을 독립적으로 실행할 때의 비용으로 4번과 5번에 1회분씩 반영합니다. Validation 보정, 서버 기동, 사전 준비·GPU 시험·연결 점검은 따로 기록합니다. 점수 계산 시 모델을 메모리에 올리는 시간과 온라인 메타데이터 조회는 측정에 포함되며, 파일을 실제로 추가 다운로드했다면 ‘네트워크·다운로드 포함’으로 표시합니다.
-
-과거 전체 조인 7,282초와 고정 순서 조기 종료 1,896초는 실행 중인 GPU 서버에 연결한 Python 명령 시작부터 종료까지의 경과시간입니다. GPU 종류·수, 가중치·서버·동시성·캐시 조건이 확인될 때만 과거 대비 속도배율을 해석합니다. [과거 시간의 출처와 범위](HISTORICAL_70B_RESULTS.ko.md)
+최초 파일 다운로드·70B 서버 기동·GPU/CPU 시험·사전 연결 점검·실측 후 replay와 공통 보고서는 주 시간 밖입니다. 모든 방법에 같은 준비·cache 조건을 적용합니다. 측정 중 실제 추가 다운로드가 발생했다면 해당 시간에 포함됐다고 표시합니다. 과거 1·2번의 외부 시간은 그대로 인용하되, 장비·가중치·서버·cache 동일성을 확인하지 못하면 참고값으로 두고 현재 3~5번을 주 시간 비교로 사용합니다.
 
 ## 중단 시 재개
 
-**중단된 경우에만** 이 단계를 사용합니다. 새 터미널에서 원래 Python 환경과 인증을 활성화하고 `source /실제/기존/R/settings.sh` 후 `cd "$BENCHMARK_DIR"`를 실행합니다. 이 파일에는 최종 임베딩 장치·GPU UUID도 보존돼 있습니다. 점수를 다시 만들어야 한다면 먼저 원래 호스트·GPU 할당과 `check_embedding_context`를 확인하고, 기존 점수·타이머를 덮지 않습니다. 원래 점수·출력 폴더·실험 번호를 사용하면 완료된 논문은 건너뜁니다. 아래는 첫 번째 3번 재개의 예입니다.
+실행기가 실패하거나 중단되면 원본 workflow 상태·타이머·점수·진행 기록을 보존합니다. **일부 단계부터 재개한 시간을 처음부터 완료한 전체 시간으로 쓰지 않습니다.** LLM `summary.resumed=false`여도 앞선 score/calibrate 단계를 재사용했다면 새로운 전체 시간으로 인정할 수 없습니다. 완전한 새 실측은 새 출력 위치에서 모든 필수 단계를 다시 수행해야 하므로 추가 live 실행 전 팀에 보고합니다.
+
+실행기에 HUP·INT·TERM이 전달되면 해당 측정 작업 그룹에도 종료를 전달하고 실패 상태를 기록합니다. 공유 70B 서버는 종료 대상이 아닙니다. SIGKILL·노드 종료는 상태를 기록할 수 없어 `running`이 남을 수 있으며 성공으로 해석하지 않습니다. 다시 제출하기 전에 기존 작업이 종료됐는지 확인합니다.
+
+완료되지 않은 **LLM 평가만 복구**할 때는 기존 환경과 인증을 활성화하고 `source /실제/기존/R/settings.sh`, `cd "$BENCHMARK_DIR"` 후 아래와 같이 실행합니다. 이 작업은 workflow를 complete로 바꾸지 않으며 전체 시간은 미측정으로 남습니다.
 
 ```bash
 preflight experiment3_resume1
@@ -543,8 +511,8 @@ fresh "$R/experiment3_resume1_wall_s.txt" "$R/experiment3_resume1.log"
   --output-dir "$R/experiment3" > "$R/experiment3_resume1.log" 2>&1
 ```
 
-4번은 원래 BioLORD 점수와 실험 번호를, 5번은 원래 calibration·policy까지 사용합니다. 재개할 때마다 사전 점검·로그·타이머에 새 이름을 붙입니다. 미완료 논문의 호출은 일부 빠질 수 있어 재개 시간을 더해 무중단 실측 시간으로 쓰지 않습니다. 전체 시간이 필요하면 보존한 점수를 사용해 새 출력 폴더에서 다시 실측합니다.
+4번은 원래 `test_biolord.json`, 5번은 **`test_biolord_exp5.json`과 원래 `thresholds.json`·conservative 정책**을 사용합니다. 같은 설정만 재개하며 점수·최초 타이머를 덮지 않습니다. 점수를 다시 만들어야 하면 원래 호스트·GPU 할당을 재확인합니다. 완료된 workflow를 재호출하면 기존 파일을 보호하기 위해 거부합니다.
 
 ## 결과 백업
 
-노드 예약이 끝나기 전에 **이번 `R` 디렉터리 전체**를 팀의 지속 저장소에 보관합니다. `comparison.json`의 품질 수치를 검토할 때에는 점수·임계값, 실험별 manifest·progress·articles·summary, replay 결과가 함께 필요합니다. 시간을 검토할 때에는 각 외부 타이머·실행 로그, 준비 로그, 서버 구성과 장비·패키지 기록, `embedding_inventory.log`·시험 로그·`embedding-choice.json`·`settings.sh`를 함께 사용합니다.
+예약 종료 전에 **이번 `R` 전체**를 지속 저장소에 보관하고 파일 목록·크기·SHA-256으로 일치를 확인합니다. 네 점수 JSON, threshold, live 세 폴더, replay 두 파일, comparison, 단계 타이머/로그, 각 workflow의 `status.json`·`total_wall_s.txt`·`execution.log`, 장치 선택·시험·환경·서버 기록을 모두 포함합니다. 인증 정보와 모델 가중치 파일 자체는 결과 백업에 넣지 않습니다.

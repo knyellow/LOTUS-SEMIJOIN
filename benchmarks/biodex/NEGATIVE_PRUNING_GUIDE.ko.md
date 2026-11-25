@@ -10,9 +10,9 @@ Semi-join은 각 논문에 대해 **조건을 만족하는 라벨이 하나라�
 |---|---|---|
 | **3: E5 정렬** | E5 점수가 높은 라벨부터 LLM에 질문합니다. | 기존 순서보다 호출을 줄이는지 |
 | **4: BioLORD 정렬** | 같은 초록 조각을 BioLORD로 점수화합니다. | E5보다 witness를 앞에서 찾는지 |
-| **5: BioLORD + pruning** | 모든 라벨에 점수가 낮은 논문은 평가를 생략합니다. | 추가 절감과 정답 누락의 교환 |
+| **5: BioLORD + pruning** | 자체 validation 보정·test 점수 생성 후 낮은 점수 논문을 생략합니다. | 준비 비용을 포함한 추가 절감과 정답 누락의 교환 |
 
-**새 실측은 3→4→5 각 1회, 총 3회입니다.** 기존 70B 1·2번 수치는 별도 표로 인용합니다. 원본 선택 CSV가 없어 새 결과와의 `vs_join_full`은 계산하지 않습니다. 두 threshold의 replay는 추가 LLM 호출이 없습니다.
+**새 실측은 3→4→5 각 1회, 총 3회입니다.** 기존 70B 1·2번 수치는 별도 표로 인용합니다. 원본 선택 CSV가 없어 새 결과와의 `vs_join_full`은 계산하지 않습니다. 3·4·5번은 점수 생성부터 독립 실행합니다. 5번의 validation·보정도 전체 시간에 포함하고, 실측 후 두 threshold의 replay는 추가 LLM 호출 없이 별도 수행합니다.
 
 3·4번은 같은 pair 판정이 주어지면 순서만 바꿔도 선택 결과가 같습니다. 5번은 논문을 생략하므로 결과를 바꿀 수 있는 근사 최적화입니다. 실제 live 실행은 LLM 판정 변동이 있을 수 있어 품질도 함께 측정합니다.
 
@@ -24,7 +24,7 @@ Semi-join은 각 논문에 대해 **조건을 만족하는 라벨이 하나라�
 | 데이터·질문 | BioDEX test 앞 250편, liver 10개 라벨, `paper` | 같은 질문과 논문 범위에서 비교합니다. |
 | Proxy 입력 | **Abstract 전체** | 초록의 뒷부분도 순서·생략 판단에 활용합니다. |
 | LLM 입력 | **`fulltext_processed[:8000]`** | 기존 LLM 판정 입력을 유지합니다. 단위는 문자입니다. |
-| 임베딩 장치 | **사전 시험을 통과한 GPU 한 장, 사용할 수 없으면 CPU** | 70B 배정을 유지하면서 임베딩을 가속합니다. 3번 전에 선택하고 세 점수 생성의 장치를 통일합니다. |
+| 임베딩 장치 | **사전 시험을 통과한 GPU 한 장, 사용할 수 없으면 CPU** | 70B 배정을 유지하면서 임베딩을 가속합니다. 3번 전에 선택하고 네 점수 계산의 장치를 통일합니다. |
 | 조각·점수 | 공통 128토큰 이내, 겹침 없음, 라벨별 최대 cosine similarity | 같은 텍스트 조각에서 모델을 비교하고 어느 조각의 관련 근거든 포착합니다. |
 | Threshold | Validation gold 양성 100% 보존이 주 조건, 최소 95%가 보조 조건 | 임의의 cutoff 대신 검증 데이터의 정답으로 비용·손실 조건을 정합니다. |
 
@@ -36,7 +36,7 @@ Semi-join은 각 논문에 대해 **조건을 만족하는 라벨이 하나라�
 - E5는 기본적으로 512토큰까지 받을 수 있지만, 이번에는 BioLORD와 같은 원문 조각을 사용합니다. 각 모델을 별도로 최적화한 최고 성능 비교가 아니라 **같은 초록 조각에서의 모델 비교**입니다.
 - 한 조각의 의미가 라벨과 가깝다면 그 논문 안에서 해당 라벨을 먼저 평가하려고 최대 점수를 사용합니다. 긴 초록은 우연히 높은 최대값을 얻을 수 있으므로 threshold는 같은 조각 정책과 라벨 패널에서만 적용합니다.
 - 겹침을 두지 않아 중복 임베딩을 줄입니다. 경계에서 문맥이 끊길 수 있다는 한계는 남습니다.
-- GPU 수나 시스템 RAM만으로 사용 가능 여부를 판단하지 않습니다. 실제 score 실행 호스트에서 배정받은 GPU를 확인하고 두 모델을 별도 프로세스로 시험합니다. 사용할 수 없으면 CPU로 정하며, E5 test와 BioLORD test·validation 모두 선택한 같은 장치·GPU UUID를 사용합니다. [실행 전 장치 점검](NEGATIVE_PRUNING_RUNBOOK.ko.md#임베딩-장치-점검선택)
+- GPU 수나 시스템 RAM만으로 사용 가능 여부를 판단하지 않습니다. 실제 score 실행 호스트에서 배정받은 GPU를 확인하고 두 모델을 별도 프로세스로 시험합니다. 사용할 수 없으면 CPU로 정하며, E5 test와 4번 BioLORD test, 5번 BioLORD validation·test 모두 선택한 같은 장치·GPU UUID를 사용합니다. [실행 전 장치 점검](NEGATIVE_PRUNING_RUNBOOK.ko.md#임베딩-장치-점검선택)
 - 가중치·입력·정밀도·정규화는 장치 선택과 무관하게 유지합니다. CPU/GPU의 부동소수점 계산은 완전히 같지 않을 수 있으므로 점수·validation 보정을 섞지 않습니다. [PyTorch 수치 정확도 설명](https://docs.pytorch.org/docs/stable/notes/numerical_accuracy.html)
 - `paper`는 조건이 논문에 기술됐는지를 묻는 질문입니다. 실제 약물 부작용 여부를 묻는 `adr`로 바꾸지 않습니다. Test 정답은 순서·생략·LLM 입력에 넣지 않고 평가에만 사용합니다.
 - 고정된 test 자료에서 abstract 전체가 LLM 입력 8,000자 안에도 포함되는지는 [별도 증거 PR](https://github.com/knyellow/LOTUS-SEMIJOIN/pull/2)에서 검사합니다. 이 검사는 과거 노드의 데이터 revision이나 실제 서버의 추가 잘림까지 확인하지는 않습니다.
@@ -50,6 +50,7 @@ Semi-join은 각 논문에 대해 **조건을 만족하는 라벨이 하나라�
 | 파일 | 역할과 변경 이유 |
 |---|---|
 | [semijoin_pruning.py](semijoin_pruning.py) | 점수 생성·보정·실험 실행·replay·집계를 연결합니다. |
+| [run_semijoin_experiment.sh](run_semijoin_experiment.sh) | 실험별 필수 단계를 독립 실행하고 전체 외부 시간·성공/실패 상태를 기록합니다. |
 | [semijoin_baseline.py](semijoin_baseline.py) | 기존 설정·로더·조기 종료 실행기에 선택적 기능만 추가했습니다. |
 | [sentence_transformers_rm.py](../../lotus/models/sentence_transformers_rm.py) | 기존 임베딩 래퍼를 그대로 사용합니다. |
 | [sem_join.py](../../lotus/sem_ops/sem_join.py) | 기존 pair 판정 경로를 그대로 사용합니다. |
@@ -57,6 +58,10 @@ Semi-join은 각 논문에 대해 **조건을 만족하는 라벨이 하나라�
 | [tests.yml](../../.github/workflows/tests.yml) | 변경 파일을 Ruff와 기존 settings 회귀 검사에 연결합니다. |
 
 ```text
+실행기      3: E5 test score → run
+           4: BioLORD test score → run
+           5: BioLORD validation score → calibrate → 자체 test score → run
+           각 묶음 전체 외부 시간 측정, 이후 replay/report는 별도
 score      load_articles(include_abstract=True)
            → abstract_chunks → SentenceTransformersRM → 조각별 점수의 max
 calibrate  validation 점수·gold → calibrate → 두 threshold
@@ -151,7 +156,7 @@ run_early_stop → pairwise_join = lotus.sem_ops.sem_join.sem_join
 
 ### 4.4 Threshold는 validation에서 먼저 고정합니다
 
-`calibrate_file()`은 전체 validation의 BioLORD 점수와 gold 양성을 사용합니다. 주 조건 `conservative`는 gold 양성 전부, 보조 조건 `retain_95`는 최소 95%를 남기는 경계 점수를 구합니다. LLM 호출은 없습니다. 두 값은 4번 test LLM 결과를 보기 전에 고정하고 test 결과로 다시 조정하지 않습니다.
+`calibrate_file()`은 전체 validation의 BioLORD 점수와 gold 양성을 사용합니다. 주 조건 `conservative`는 gold 양성 전부, 보조 조건 `retain_95`는 최소 95%를 남기는 경계 점수를 구합니다. LLM 호출은 없습니다. 100%·95% 규칙과 conservative 실측 방침을 실행 전에 고정하고, 실제 두 값은 5번에서 validation만으로 계산합니다. 4번 test 결과로 규칙이나 threshold를 조정하지 않습니다.
 
 <details>
 <summary>100%·95%를 정수 개수로 처리하는 이유</summary>
@@ -169,7 +174,7 @@ threshold = finite_positive_scores[
 
 ### 4.5 Replay와 report는 저장된 결과를 검증한 뒤 계산합니다
 
-`replay`는 4번에서 저장한 판정에 두 gate를 적용합니다. 정책별 품질·논리적 호출 수는 계산할 수 있지만, 실제 추가 LLM 호출은 0회이고 정책의 실측 시간은 없습니다.
+`replay`는 독립 실측을 마친 뒤 4번의 원본 점수·저장 판정에 5번에서 정한 두 gate를 적용합니다. 정책별 품질·논리적 호출 수는 계산할 수 있지만, 실제 추가 LLM 호출은 0회이고 정책의 실측 시간은 없습니다.
 
 `report`는 선택 논문 ID를 같은 gold ID와 비교해 P/R/F1을 다시 계산합니다. 기존 `baseline.prf()`를 재사용해 반올림을 통일하고 정수 TP·FP·FN을 붙입니다. 저장된 실행 설정을 비교하므로 집계 컴퓨터의 모델 기본값으로 과거 설정을 덮어 해석하지 않습니다.
 
@@ -184,7 +189,8 @@ threshold = finite_positive_scores[
 | `manifest.json` | 실험·점수 해시·threshold·LLM·endpoint·서버 기록 식별자 |
 | `progress.jsonl` | 평가 완료 논문의 `_qid`, `matched`, `lm_calls`, `time_s` |
 | `articles.json` | 생략 논문을 포함한 전체 결과·gold·순위 |
-| `summary.json` | 실측 실행의 품질·편수·호출 수·내부 시간 |
+| `summary.json` | 실측 LLM 실행의 품질·편수·호출 수·내부 시간 |
+| `실험명_workflow/` | 독립 묶음의 status·전체 외부 시간·실행 로그. 5번은 validation·보정도 포함 |
 | Replay JSON | 원본 manifest, 새 `summary`, 새 `articles` 배열 |
 | `comparison.json` | `results` 배열과 공통 품질·출처·누락 실험 정보 |
 
@@ -196,9 +202,9 @@ threshold = finite_positive_scores[
 - 출력 잠금은 같은 폴더의 동시 writer를 막습니다. 중단된 JSONL은 마지막 미완성 꼬리만 복구하며 잘못된 완료 기록은 거부합니다.
 - `summary.manifest_sha256`은 설정과 결과를 연결합니다. 완료 재호출은 최초 요약·시간을 보존하고, 동일 기록으로 누락된 `articles.json`만 복구할 수 있습니다.
 - `completed_run()`은 replay와 report가 공유합니다. 원본 점수, 전체 평가 기록, 논문별 결과, 요약, manifest를 대조하며 보고 과정에서는 원본을 복구·수정하지 않습니다.
-- 공통 집계는 같은 입력·gold·라벨·조각·LLM 설정을 요구합니다. 4·5번은 정확히 같은 BioLORD 점수 파일이어야 합니다. Replay에는 검증된 원본 live run도 필요합니다.
+- 공통 집계는 같은 입력·gold·라벨·조각·LLM 설정을 요구합니다. 4·5번은 별도 BioLORD test 점수 파일을 사용하며 `embedding_time_s`만 제외한 내용이 같아야 합니다. 각 실행과 원본 replay는 자기 점수 파일의 전체 해시를 검증합니다. 실제 값이 미세하게라도 다르면 비교를 중단하고 결과·정렬·gate를 확인합니다. Replay에는 검증된 원본 live run도 필요합니다.
 - `LLM_SERVER_ID`와 해시는 저장 기록의 혼용을 검출합니다. 실제 가중치 파일·과거 서버의 동일성을 자동 입증하는 기능은 아닙니다.
-- 점수의 `embedding_device`는 요청 장치 문자열이고 `cuda:0`만으로 물리 GPU를 구별할 수 없습니다. CLI 보정·집계는 세 점수의 CPU/GPU 혼용을 자동 차단하지 않으므로 실행 문서에서 장치·UUID를 고정하고 선택 기록 및 세 파일을 대조합니다. `settings.sh`는 최종 선택 후 재개용 설정을 보존합니다.
+- 점수의 `embedding_device`는 요청 장치 문자열이고 `cuda:0`만으로 물리 GPU를 구별할 수 없습니다. CLI 보정·집계는 네 점수의 CPU/GPU 혼용을 자동 차단하지 않으므로 실행 문서에서 장치·UUID를 고정하고 선택 기록 및 네 파일을 대조합니다. `settings.sh`는 최종 선택 후 재개용 설정을 보존합니다.
 - `check-baselines`와 `run --baseline-summary`는 과거 요약에 기록된 설정을 대조하는 선택 기능입니다. `report --baseline-summary`는 선택 CSV까지 읽어 ID·편수·기존 품질 값과 대조합니다. 지정한 원본이 누락되거나 충돌하면 미측정으로 숨기지 않고 거부합니다. 이번 실행의 필수 입력은 아닙니다.
 
 </details>
@@ -247,19 +253,23 @@ additional_fn = len(tp4 - tp5)
 
 ### 실행시간
 
-시간은 **test score 명령의 외부 wall time + live run 명령의 외부 wall time**으로 비교합니다. CPU/GPU 어느 쪽이든 임베딩 계산을 포함하고, GPU 사전 시험은 별도 준비 비용입니다. 4·5번에는 공유한 BioLORD test score 시간 1회분을 각각 포함합니다. 새 실행끼리는 같은 CPU/GPU·cache 절차를 쓰며, 과거와 조건을 확인하지 못하면 과거 시간은 참고값입니다. [시간 읽기와 주의점](NEGATIVE_PRUNING_RUNBOOK.ko.md#시간과-순위-확인)에서 파일명과 명령을 확인하세요.
+주 지표는 **실험별 필수 단계 전체를 한 번에 잰 외부 wall time**입니다. 3번은 E5 test score→LLM, 4번은 BioLORD test score→LLM, 5번은 **validation score→threshold 보정→자체 test score→pruning·LLM**입니다. 점수 파일을 공유해 시간을 나눠 더하지 않습니다. 공통 파일 다운로드·서버 기동·장치 시험·연결 점검은 사전 단계이며, replay와 report는 실측 후 분석입니다. [시간 확인](NEGATIVE_PRUNING_RUNBOOK.ko.md#시간과-순위-확인)에서 명령·파일명을 확인하세요.
 
 <details>
-<summary>내부 시간과 외부 시간을 구분하기</summary>
+<summary>전체·단계·내부 시간과 재개를 구분하기</summary>
 
 | 값 | 측정 범위 |
 |---|---|
-| `embedding_time_s` | 임베딩 모델·tokenizer 준비, 조각, 벡터·유사도·max 집계. 처음 데이터 읽기와 마지막 저장은 제외됩니다. |
-| `invocation_time_s` | Score·데이터 읽기, 검증·정렬·gate, LM 구성·평가·논문별 결과 구성. 최종 요약·JSON 저장은 제외됩니다. |
-| `estimated_embedding_plus_run_time_s` | 위 별도 구간의 추정 합. 전체 명령 wall time이 아닙니다. 재개·replay는 `null`입니다. |
-| 기존 `time_s` | Full은 버전별 join 시간 또는 청크 합, early는 현재 invocation의 실행기 시간입니다. |
+| `실험명_workflow/total_wall_s.txt` | 주 시간. 전체 필수 단계·프로세스·검증·입출력까지 포함하며 status complete·exit 0·새 묶음 완료일 때만 유효 |
+| 각 단계 `*_wall_s.txt` | score·calibrate·run 명령별 외부 시간. 부표이며 주 시간을 다시 합산하는 재료로 쓰지 않음 |
+| `embedding_time_s` | 단일 score 내부의 모델·tokenizer·조각·벡터·유사도 집계. 처음 데이터 읽기·마지막 저장 제외 |
+| `invocation_time_s` | 단일 run 내부의 점수·데이터 읽기, 검증·정렬·gate·LM 평가·결과 구성. 최종 저장 제외 |
+| `estimated_embedding_plus_run_time_s` | 기존 test score 내부 시간 + run 내부 시간의 추정값. **5번 validation·보정 비용이 없어 전체 시간이 아님** |
+| 기존 `time_s` | 과거 Full의 청크 합 또는 Early Stopping 실행기 내부 시간. 주 외부 시간과 비교하지 않음 |
 
-병렬 논문별 시간·shard 시간의 합, 재개 잔여 시간, 완료 재호출의 짧은 시간을 전체 시간으로 사용하지 않습니다. `manifest.json`이 이미 있으면 완료 논문이 0개여도 `resumed=true`입니다. 손실된 미완료 논문·chunk 호출과 HTTP 재시도도 완료 기록의 논리적 호출 합계에는 없습니다.
+실행기는 먼저 새 workflow 폴더를 선점하고 상태를 기록합니다. HUP·INT·TERM이면 측정 작업 그룹에 종료를 전달하고 실패로 기록하며 공유 70B 서버는 유지합니다. SIGKILL·노드 종료로 `running`이 남아도 성공이 아닙니다. 실패·중단·일부 단계 재개는 전체 시간을 미측정으로 표시하며, GNU time에 숫자가 남았다는 이유만으로 채택하지 않습니다. `summary.resumed=false`라도 이미 계산한 score/calibration부터 재개했다면 전체 시간은 복원되지 않습니다. 병렬 논문 시간·shard 합·재개 잔여 시간·완료 재호출 시간도 전체 시간으로 사용하지 않습니다.
+
+다운로드된 파일·가동된 70B 서비스에서 출발하는 비용입니다. 최초 다운로드나 실제 측정 중 추가 다운로드, 과거와 다른 장비·서버·cache 조건은 별도로 명시합니다. 확인되지 않은 과거 시간은 참고값이고 같은 현재 환경의 3~5번을 주 비교로 사용합니다.
 
 </details>
 

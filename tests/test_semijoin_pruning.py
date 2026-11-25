@@ -4,8 +4,12 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -102,12 +106,15 @@ class TestSemijoinPruning(unittest.TestCase):
                 scores["chunks_sha256"] = pruning.digest(["first", "second", "third"])
                 scores["scorer"]["chunking"] = {"version": 1, "token_budget": 128, "overlap": 0}
                 scores["articles"].append({"_qid": 2, "scores": [0.6, 0.1], "gold_matches": []})
+                scores["embedding_time_s"] = float(experiment)
+                scores["embedding_device"] = "cpu"
+                for row in scores["articles"]:
+                    row["n_chunks"] = 1
                 if experiment == 3:
                     scores["scorer"]["model"] = pruning.MODELS["e5"]
                     scores["articles"][0]["scores"] = [0.9, 0.1]
-                score_path = root / ("e5.json" if experiment == 3 else "bio.json")
-                if not score_path.exists():
-                    pruning.save_json(score_path, scores)
+                score_path = root / {3: "e5.json", 4: "bio4.json", 5: "bio5.json"}[experiment]
+                pruning.save_json(score_path, scores)
                 directory = root / f"run{experiment}"
                 pruning.run(SimpleNamespace(scores=score_path, output_dir=directory, experiment=experiment,
                                             threshold=0.7 if experiment == 5 else None, calibration=None))
@@ -120,7 +127,7 @@ class TestSemijoinPruning(unittest.TestCase):
                          vs_labels=baseline.prf({0, 2}, {0, 1}))
             (legacy / f"{method}_semi.csv").write_text("_qid,title\n0,first\n2,third\n", encoding="utf-8")
         pruning.save_json(legacy / "summary.json", summary)
-        args = SimpleNamespace(scores=root / "bio.json", runs=runs, replay=[],
+        args = SimpleNamespace(scores=root / "bio4.json", runs=runs, replay=[],
                                baseline_summary=[legacy / "summary.json"], output=root / "comparison.json")
         baseline.configure.reset_mock()
         baseline.load_articles.reset_mock()
@@ -225,20 +232,41 @@ class TestSemijoinPruning(unittest.TestCase):
                     baseline.configure.assert_not_called()
                     baseline.load_articles.assert_not_called()
 
-    def test_report_requires_same_biolord_file_for_four_and_five(self):
+    def test_report_rejects_independent_biolord_content_differences(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
             root = Path(directory)
             baseline, args = self.report_fixture(root)
-            scores = pruning.read_json(args.scores)
-            scores["embedding_time_s"] += 1
-            alternate = root / "other-bio.json"
-            pruning.save_json(alternate, scores)
             with patch.dict(sys.modules, {"semijoin_baseline": baseline}):
-                pruning.run(SimpleNamespace(scores=alternate, output_dir=root / "other5", experiment=5,
-                                            threshold=0.7, calibration=None))
-                args.runs[-1] = (alternate, root / "other5")
-                with self.assertRaisesRegex(ValueError, "same BioLORD score file"):
+                for field in ("score", "scorer", "device", "n_chunks"):
+                    with self.subTest(field=field):
+                        scores = pruning.read_json(root / "bio5.json")
+                        if field == "score":
+                            scores["articles"][0]["scores"][0] = np.nextafter(0.2, 1.0)
+                        elif field == "scorer":
+                            scores["scorer"]["revision"] = "other"
+                        elif field == "device":
+                            scores["embedding_device"] = "cuda"
+                        else:
+                            scores["articles"][0]["n_chunks"] += 1
+                        alternate, run_dir = root / f"{field}.json", root / f"run-{field}"
+                        pruning.save_json(alternate, scores)
+                        pruning.run(SimpleNamespace(scores=alternate, output_dir=run_dir, experiment=5,
+                                                    threshold=0.7, calibration=None))
+                        args.runs[-1] = (alternate, run_dir)
+                        with self.assertRaisesRegex(ValueError, "identical BioLORD score files"):
+                            pruning.report(args)
+
+    def test_report_and_replay_require_each_live_runs_original_scores(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            baseline, args = self.report_fixture(root)
+            with patch.dict(sys.modules, {"semijoin_baseline": baseline}):
+                args.runs[-1] = (root / "bio4.json", root / "run5")
+                with self.assertRaisesRegex(ValueError, "exactly the same scores"):
                     pruning.report(args)
+                with self.assertRaisesRegex(ValueError, "exactly the same scores"):
+                    pruning.replay(SimpleNamespace(scores=root / "bio5.json", source_dir=root / "run4",
+                                                   threshold=0.7, calibration=None, output=root / "replay.json"))
 
     def test_report_uses_existing_prf_for_rounding_edge_cases(self):
         baseline = load_baseline()
@@ -822,6 +850,131 @@ class TestSemijoinPruning(unittest.TestCase):
             replay_args.output = root / "run" / "articles.json"
             with self.assertRaisesRegex(ValueError, "Output must differ"):
                 pruning.replay(replay_args)
+
+
+class TestSemijoinExperimentRunner(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        has_tools = all(shutil.which(cmd) for cmd in ("bash", "setsid")) and Path("/usr/bin/time").is_file()
+        if os.name != "posix" or not has_tools:
+            raise unittest.SkipTest("Runner requires Bash, setsid and GNU time on POSIX.")
+        probe = subprocess.run(["/usr/bin/time", "-f", "%e", "-o", os.devnull, "true"], capture_output=True)
+        if probe.returncode:
+            raise unittest.SkipTest("Runner requires GNU time.")
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="semijoin study ")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=BENCHMARK)
+        (self.root / "code_commit.txt").write_bytes(commit)
+        (self.root / "settings.sh").write_text(
+            'fresh() { for path do test ! -e "$path" || return 1; done; }\n'
+            'preflight() { :; }\ncheck_embedding_context() { :; }\n', encoding="utf-8"
+        )
+        python = self.root / "python"
+        python.write_text("""#!/usr/bin/env python3
+import json, os, sys, time
+from pathlib import Path
+if sys.argv[1] == "-":
+    sys.stdin.read()
+    sys.exit(0)
+assert sys.argv[1] == "semijoin_pruning.py"
+root = Path(os.environ["R"])
+command, *args = sys.argv[2:]
+if command == os.environ.get("SLEEP_STAGE"):
+    (root / "sleeping_group").write_text(str(os.getpgrp()))
+with (root / "calls.jsonl").open("a") as trace:
+    trace.write(json.dumps([command, *[arg.removeprefix(str(root) + "/") for arg in args]]) + "\\n")
+print(command, flush=True)
+if command == os.environ.get("SLEEP_STAGE"):
+    time.sleep(0.5)
+if command == os.environ.get("FAIL_STAGE"):
+    sys.exit(23)
+if command == "run":
+    output = Path(args[args.index("--output-dir") + 1])
+    output.mkdir()
+    for name in ("summary.json", "articles.json"):
+        (output / name).write_text("{}")
+else:
+    Path(args[args.index("--output") + 1]).write_text("{}")
+""", encoding="utf-8")
+        python.chmod(0o755)
+        self.env = dict(os.environ, R=str(self.root), BENCHMARK_DIR=str(BENCHMARK), REACTION_SET="liver",
+                        PROMPT="paper", N_ARTICLES="250", EMBED_DEVICE="cpu", EMBED_GPU_UUID="mock",
+                        PATH=str(self.root) + os.pathsep + os.environ["PATH"], FAIL_STAGE="", SEMIJOIN_TIMED_CHILD="")
+
+    def launch(self, experiment, *args, **settings):
+        return subprocess.run(["bash", BENCHMARK / "run_semijoin_experiment.sh", str(experiment), self.root, *args],
+                              env={**self.env, **settings}, capture_output=True, text=True, timeout=20)
+
+    def calls(self):
+        return [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
+
+    def test_three_fresh_workflows_measure_their_own_scores_and_live_run(self):
+        for experiment, name, stages in [
+            (3, "experiment3", ["test_e5_score"]),
+            (4, "experiment4", ["test_biolord_score"]),
+            (5, "experiment5_conservative", ["validation_biolord", "calibration", "test_biolord_exp5_score"]),
+        ]:
+            result = self.launch(experiment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            workflow = self.root / f"{name}_workflow"
+            self.assertEqual(pruning.read_json(workflow / "status.json"),
+                             {"experiment": experiment, "status": "complete", "exit_code": 0})
+            self.assertGreaterEqual(float((workflow / "total_wall_s.txt").read_text()), 0)
+            for stage in [*stages, name]:
+                self.assertGreaterEqual(float((self.root / f"{stage}_wall_s.txt").read_text()), 0)
+                self.assertTrue((self.root / f"{stage}.log").read_text().strip())
+        self.assertEqual(self.calls(), [command.split() for command in [
+            "score --model e5 --split test --n-articles 250 --device cpu --output test_e5.json",
+            "run test_e5.json --experiment 3 --output-dir experiment3",
+            "score --model biolord --split test --n-articles 250 --device cpu --output test_biolord.json",
+            "run test_biolord.json --experiment 4 --output-dir experiment4",
+            "score --model biolord --split validation --device cpu --output validation_biolord.json",
+            "calibrate validation_biolord.json --output thresholds.json",
+            "score --model biolord --split test --n-articles 250 --device cpu --output test_biolord_exp5.json",
+            "run test_biolord_exp5.json --experiment 5 --calibration thresholds.json --policy conservative "
+            "--output-dir experiment5_conservative",
+        ]])
+
+    def test_failed_calibration_stops_following_stages_and_preserves_files(self):
+        self.assertNotEqual(self.launch(3, N_ARTICLES="249").returncode, 0)
+        self.assertFalse((self.root / "experiment3_workflow").exists())
+        result = self.launch(5, FAIL_STAGE="calibrate")
+        self.assertEqual(result.returncode, 23, result.stderr)
+        workflow = self.root / "experiment5_conservative_workflow"
+        self.assertEqual(pruning.read_json(workflow / "status.json"),
+                         {"experiment": 5, "status": "failed", "exit_code": 23})
+        self.assertEqual([call[0] for call in self.calls()], ["score", "calibrate"])
+        before = {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
+        for args in [(), ("--timed",)]:
+            self.assertNotEqual(self.launch(5, *args).returncode, 0)
+            self.assertEqual({path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
+
+    def test_term_to_launcher_records_failed_workflow(self):
+        trace = self.root / "calls.jsonl"
+        with subprocess.Popen(["bash", BENCHMARK / "run_semijoin_experiment.sh", "5", self.root],
+                              env={**self.env, "SLEEP_STAGE": "calibrate"}) as launcher:
+            deadline = time.monotonic() + 10
+            while not trace.exists() or '["calibrate",' not in trace.read_text():
+                self.assertIsNone(launcher.poll(), "Launcher exited before calibration")
+                self.assertLess(time.monotonic(), deadline, "Timed out waiting for calibration")
+                time.sleep(0.01)
+            launcher.terminate()
+            self.assertEqual(launcher.wait(timeout=10), 143)
+        self.assertEqual(pruning.read_json(self.root / "experiment5_conservative_workflow/status.json"),
+                         {"experiment": 5, "status": "failed", "exit_code": 143})
+        self.assertEqual([call[0] for call in self.calls()], ["score", "calibrate"])
+        group = int((self.root / "sleeping_group").read_text())
+        deadline = time.monotonic() + 3
+        while True:
+            try:
+                os.killpg(group, 0)
+            except ProcessLookupError:
+                break
+            self.assertLess(time.monotonic(), deadline, "Timed child process group survived TERM")
+            time.sleep(0.02)
 
 
 if __name__ == "__main__":
