@@ -29,6 +29,8 @@ Linux Bash에서 아래 순서로 실행합니다. **70B GPU 서비스에서 3�
 
 먼저 `git status --short`에서 실험 코드·문서의 미커밋 변경과 영향을 줄 수 있는 미추적 파일을 확인합니다. 변경이 있으면 기존 작업을 보존하고 확인한 PR 커밋의 깨끗한 별도 체크아웃을 사용합니다. 아래 tracked 변경 검사가 실패하면 진행하지 않습니다. 커밋 SHA만 같다고 작업 폴더 내용까지 같지는 않으며, 이 준비 명령은 실험 중 반복하지 않습니다.
 
+아래 `fetch/switch/pull`은 브랜치 작업 폴더 기준입니다. 이미 확인한 PR SHA의 깨끗한 detached worktree를 준비했다면 HEAD 일치를 대조한 뒤 이 세 줄을 생략하고 설치 단계로 진행합니다. 미커밋 변경 검사는 그대로 유지합니다. 다른 작업 폴더가 같은 브랜치를 사용 중이면 detached worktree에서 `git switch`가 거부될 수 있습니다.
+
 ```bash
 set -euo pipefail
 unset PYTHONOPTIMIZE
