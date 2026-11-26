@@ -156,6 +156,7 @@ For more, you can checkout the official [docs](https://lotus-ai.readthedocs.io/e
 
 | 읽을 문서 | 확인할 내용 |
 |---|---|
+| [서버 AI 실행 요청](benchmarks/biodex/SERVER_AI_EXPERIMENT_PROMPT.ko.md) | 다른 AI에 전달할 준비·3→4→5·분석·백업 지시문 |
 | [실험 개요](benchmarks/biodex/README.md) | 비교할 세 방법과 확정한 범위 |
 | [서버 실행 절차](benchmarks/biodex/NEGATIVE_PRUNING_RUNBOOK.ko.md) | 준비·실행·집계·시간 확인·재개 명령 |
 | [코드와 설계 설명](benchmarks/biodex/NEGATIVE_PRUNING_GUIDE.ko.md) | 구현 흐름, 선택 이유, 지표 해석 |
