@@ -40,7 +40,7 @@ Semi-join은 각 논문에 대해 **조건을 만족하는 라벨이 하나라�
 - 겹침을 두지 않아 중복 임베딩을 줄입니다. 경계에서 문맥이 끊길 수 있다는 한계는 남습니다.
 - GPU 수나 시스템 RAM만으로 사용 가능 여부를 판단하지 않습니다. 실제 score 실행 호스트에서 배정받은 GPU를 확인하고 두 모델을 별도 프로세스로 시험합니다. 사용할 수 없으면 CPU로 정하며, E5 test와 4번 BioLORD test, 5번 BioLORD validation·test 모두 선택한 같은 장치·GPU UUID를 사용합니다. [실행 전 장치 점검](NEGATIVE_PRUNING_RUNBOOK.ko.md#임베딩-장치-점검선택)
 - 가중치·입력·정밀도·정규화는 장치 선택과 무관하게 유지합니다. CPU/GPU의 부동소수점 계산은 완전히 같지 않을 수 있으므로 점수·validation 보정을 섞지 않습니다. [PyTorch 수치 정확도 설명](https://docs.pytorch.org/docs/stable/notes/numerical_accuracy.html)
-- `paper`는 조건이 논문에 기술됐는지를 묻는 질문입니다. 실제 약물 부작용 여부를 묻는 `adr`로 바꾸지 않습니다. Test 정답은 순서·생략·LLM 입력에 넣지 않고 평가에만 사용합니다.
+- `paper`는 조건이 논문에 기술됐는지를 묻는 질문입니다. 실제 약물 부작용 여부를 묻는 `adr`로 바꾸지 않습니다. Test 정답은 입력 일치 점검·품질 평가·gold 순위 진단에 사용하며, 라벨 평가 순서·논문 생략·LLM 입력을 결정하는 데에는 사용하지 않습니다.
 - 고정된 test 자료에서 abstract 전체가 LLM 입력 8,000자 안에도 포함되는지는 [별도 증거 PR](https://github.com/knyellow/LOTUS-SEMIJOIN/pull/2)에서 검사합니다. 이 검사는 과거 노드의 데이터 revision이나 실제 서버의 추가 잘림까지 확인하지는 않습니다.
 
 </details>
@@ -226,6 +226,8 @@ threshold = finite_positive_scores[
 
 품질은 **논문 선택의 정확도**입니다. Gold 양성 논문을 선택하면 TP이며, LLM이 지목한 개별 라벨의 정확도는 아닙니다. 5번이 생략한 양성도 전체 분모에서 FN으로 남습니다. 과거 1·2번은 보고된 호출 수·F1·외부 시간만 별도 표에 인용합니다.
 
+실측·replay의 `summary`는 반올림하지 않은 비율을 저장하고, 공통 `report.results[].vs_labels`는 기존 `prf()`로 소수 넷째 자리까지 반올림합니다. 최종 비교표의 품질은 공통 report 값으로 맞추고, 정수 TP·FP·FN은 그대로 비교합니다.
+
 ### Witness 순위와 추가 손실
 
 | 지표 | 읽을 값 | 비교할 대상 |
@@ -245,9 +247,13 @@ Witness가 없으면 순위도 없습니다. 모든 라벨이 False인 논문의
 tp4 = {r['_qid'] for r in rows4 if r['gold_positive'] and r['matched'] is not None}
 tp5 = {r['_qid'] for r in rows5 if r['gold_positive'] and r['matched'] is not None}
 additional_fn = len(tp4 - tp5)
+new_tp_in_5 = len(tp5 - tp4)
+net_fn_change = additional_fn - new_tp_in_5
 ```
 
 `n_positive_pruned`에는 4번도 놓쳤던 양성이 포함될 수 있어 위 추가 FN과 다릅니다. F1이 올라도 오탐 제거 효과일 수 있으므로 LLM 자체의 판정 능력이 좋아졌다고 해석하지 않습니다.
+
+`additional_fn`은 **4번에서 찾았지만 5번이 놓친 정답 수**입니다. Replay는 4번 판정을 그대로 사용하므로 이것이 FN 증가분과 같습니다. 별도 live에서는 판정 변동으로 5번이 새로 찾은 정답도 있을 수 있어, FN의 순변화는 `net_fn_change`로 구분합니다. 위 세 값은 저장된 ID에서 계산하는 분석값이며 공통 JSON에 자동 저장되는 필드는 아닙니다.
 
 과거 원본을 복구하면 1번은 `runs.join_full`, 2번은 `runs.early_stop`에서 `lm_calls`, `n_gold`, `vs_labels.n_pred`, `vs_labels.{precision,recall,f1}`를 읽습니다. 새 값은 각각 `lm_calls`, `n_positive`, `n_selected`, 품질 필드에 대응합니다. 1번 `join_rows`는 매칭 pair 수라 선택 논문 수와 비교하면 안 됩니다. 선택 수는 `*_semi.csv`의 고유 `_qid`로, 1번은 pair CSV를 투영해서도 계산할 수 있습니다.
 
@@ -266,8 +272,8 @@ additional_fn = len(tp4 - tp5)
 |---|---|
 | `실험명_workflow/total_wall_s.txt` | 주 시간. 전체 필수 단계·프로세스·검증·입출력까지 포함하며 status complete·exit 0·새 묶음 완료일 때만 유효 |
 | 각 단계 `*_wall_s.txt` | score·calibrate·run 명령별 외부 시간. 부표이며 주 시간을 다시 합산하는 재료로 쓰지 않음 |
-| `embedding_time_s` | 단일 score 내부의 모델·tokenizer·조각·벡터·유사도 집계. 처음 데이터 읽기·마지막 저장 제외 |
-| `invocation_time_s` | 단일 run 내부의 점수·데이터 읽기, 검증·정렬·gate·LM 평가·결과 구성. 최종 저장 제외 |
+| `embedding_time_s` | 단일 score에서 모델 로딩부터 tokenizer·조각·벡터·유사도 집계까지. 처음 데이터 읽기와 이후 gold 행 구성·입력/tokenizer 해시 계산·JSON 저장·null 로그 제외 |
+| `invocation_time_s` | `run_locked()`의 점수·데이터 읽기부터 검증·정렬·gate·LM 평가·논문별 결과 구성까지. 함수 진입 전 준비와 이후 요약 지표 계산·JSON 저장 제외 |
 | `estimated_embedding_plus_run_time_s` | 기존 test score 내부 시간 + run 내부 시간의 추정값. **5번 validation·보정 비용이 없어 전체 시간이 아님** |
 | 기존 `time_s` | 과거 Full의 청크 합 또는 Early Stopping 실행기 내부 시간. 주 외부 시간과 비교하지 않음 |
 

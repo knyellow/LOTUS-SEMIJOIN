@@ -86,7 +86,7 @@ cat "$R/experiment5_conservative_workflow/status.json"
 | 논문 단위 품질·선택 수 | `comparison.json`의 `results[].vs_labels` TP/FP/FN/precision/recall/f1, `results[].n_selected` |
 | 논리 LLM 비용 | `lm_calls`. HTTP 재시도·토큰 수와 다릅니다. Replay는 모의 비용이며 추가 실제 호출 0회 |
 | 순서 효과 | 첫 gold 순위와 첫 LLM 수락 순위를 구분. 미매칭 K회·생략 0회를 순위로 넣지 않으며 LLM 비교는 공통 ID·편수 표시 |
-| Pruning 손실 | Live `summary.json` 또는 replay JSON의 `summary`에서 `n_positive_pruned`·`positive_retention`, 공통 `results[].vs_labels`에서 recall·f1을 읽음. 추가 FN은 양쪽 `articles`의 선택 gold ID 차집합으로 계산. Replay/live를 구분 |
+| Pruning 손실 | Live `summary.json` 또는 replay JSON의 `summary`에서 `n_positive_pruned`·`positive_retention`, 공통 `results[].vs_labels`에서 recall·f1을 읽음. 4번만 찾은 정답 수와 live 5번이 새로 찾은 정답 수를 양쪽 `articles`의 선택 gold ID로 각각 계산해 FN 순변화와 구분. Replay/live를 구분 |
 | 주 실행시간 | 각 `실험명_workflow/total_wall_s.txt`. **단계별 시간을 더한 값으로 대체하지 않음** |
 | 보조 시간 | 각 score/calibrate/run `*_wall_s.txt`. 내부 `embedding_time_s`·`invocation_time_s`와 측정 범위 구분 |
 | Null 요약 | `test_e5_score.log`, `test_biolord_score.log`, `validation_biolord.log`, `test_biolord_exp5_score.log`의 `null_scores=` 개수·영향 논문 수·qids |
