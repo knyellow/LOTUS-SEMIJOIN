@@ -27,12 +27,16 @@ Linux Bash에서 아래 순서로 실행합니다. **70B GPU 서비스에서 3�
 
 서버에서 팀의 LOTUS Conda/venv를 활성화한 뒤 저장소 루트에서 시작합니다. 이후 모든 명령은 같은 Bash 세션에서 순서대로 실행합니다.
 
+먼저 `git status --short`에서 실험 코드·문서의 미커밋 변경과 영향을 줄 수 있는 미추적 파일을 확인합니다. 변경이 있으면 기존 작업을 보존하고 확인한 PR 커밋의 깨끗한 별도 체크아웃을 사용합니다. 아래 tracked 변경 검사가 실패하면 진행하지 않습니다. 커밋 SHA만 같다고 작업 폴더 내용까지 같지는 않으며, 이 준비 명령은 실험 중 반복하지 않습니다.
+
 ```bash
 set -euo pipefail
 unset PYTHONOPTIMIZE
+git diff --quiet HEAD --
 git fetch origin
 git switch feat/biolord-negative-pruning
 git pull --ff-only
+git diff --quiet HEAD --
 python -m pip install --no-deps -e .
 python - <<'PY'
 import sys, torch, lotus, datasets
@@ -128,6 +132,8 @@ fresh() {
 ### 연결 점검 함수 등록
 
 아래 블록을 한 번 실행합니다. 이후 각 `preflight`가 실제 모델 ID와 LOTUS를 통한 짧은 요청의 응답을 확인합니다. 이 요청은 실험 호출 수와 시간에서 제외합니다. 세 실험에 같은 캐시 절차와 사전 점검을 적용합니다.
+
+짧은 응답 시험은 출력 길이 인자를 포함한 요청의 수락만 확인합니다. 서버가 256토큰 상한을 실제로 적용하는지는 서버 설정·버전·로그로 별도 확인하고 미확인 사항은 기록합니다.
 
 ```bash
 preflight() {

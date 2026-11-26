@@ -20,6 +20,8 @@ BioDEX test 앞 250편에서 간손상 반응 10개 중 하나라도 논문에 �
 
 아래는 원래 BioDEX 벤치마크의 사용법입니다. RP@5·RP@10은 JoinAndRerank의 순위 지표이며, 위 팀 실험에서는 논문 단위 F1·recall을 사용합니다.
 
+원문의 `requirements.txt`와 `biodex_results/Mar-17-25` 예시 자료는 현재 저장소에 없습니다. 아래는 당시 안내를 참고 기록으로 보존한 것이며, 팀의 3·4·5번 실험은 위 서버 실행 절차를 사용합니다.
+
 Instructions for running biodex pipeline:
 
 Setup:

@@ -10,7 +10,7 @@ PR과 문서를 읽고 사전 점검 → 3번 → 4번 → 5번 → 결과 검�
 - 사용할 커밋: **이 문서를 포함한 PR #1의 커밋**입니다. 준비를 시작할 때 PR의 HEAD와 로컬 HEAD를 대조하고, 전체 SHA를 기록한 뒤 고정하세요.
 - 같은 커밋의 [서버 실행 절차](NEGATIVE_PRUNING_RUNBOOK.ko.md), [코드·설계·지표 설명](NEGATIVE_PRUNING_GUIDE.ko.md), [기존 70B 기록](HISTORICAL_70B_RESULTS.ko.md)을 읽으세요.
 
-**이 요청은 점수 공유·단계 시간 합산·4번 전 validation 보정을 요구하던 이전 요청을 대체합니다.** 기존 수정 파일은 보존하고 필요하면 별도 체크아웃을 사용하세요. Runbook 처음의 fetch/switch/pull은 최초 준비 때만 적용하고, 사용한 문서와 코드가 같은 커밋인지 확인하세요. PR이 갱신돼 읽었던 문서와 HEAD가 달라졌다면 실행 전에 해당 커밋의 문서를 다시 읽으세요. 기준 커밋과 패키지를 기록한 뒤 실험 중 코드를 갱신하거나 벤치마크 의미를 수정하지 마세요.
+**이 요청은 점수 공유·단계 시간 합산·4번 전 validation 보정을 요구하던 이전 요청을 대체합니다.** 먼저 `git status --short`로 작업 폴더를 확인하세요. 실험 코드·문서에 미커밋 변경이나 영향을 줄 수 있는 미추적 파일이 있으면 기존 작업을 보존하고, 확인한 PR 커밋의 깨끗한 별도 체크아웃에서 진행하세요. HEAD가 같아도 수정 파일이 남으면 다른 코드가 실행됩니다. Runbook 처음의 fetch/switch/pull은 최초 준비 때만 적용하고, 사용한 문서와 코드가 같은 커밋인지 확인하세요. PR이 갱신돼 읽었던 문서와 HEAD가 달라졌다면 실행 전에 해당 커밋의 문서를 다시 읽으세요. 기준 커밋과 패키지를 기록한 뒤 실험 중 코드를 갱신하거나 벤치마크 의미를 수정하지 마세요.
 
 ## 고정할 조건
 
@@ -29,7 +29,7 @@ PR과 문서를 읽고 사전 점검 → 3번 → 4번 → 5번 → 결과 검�
 
 Runbook의 서버 준비 절을 순서대로 실행하세요. 기존 LOTUS Python 환경을 활성화하고 `PYTHONOPTIMIZE`를 해제하세요. 같은 사용자·캐시에서 test·validation 데이터, 두 모델 가중치·tokenizer 파일을 미리 준비합니다. 준비된 파일과 기동된 LLM 서비스에서 출발하는 시간을 비교합니다.
 
-새 결과 폴더 `R`을 한 번 만들고 기준 커밋·패키지·데이터 fingerprint·서버 설정·GPU·캐시 절차를 기록하세요. `LLM_MODEL`은 확인한 70B 서비스의 `hosted_vllm/<실제 ID>`로 지정하고 8B 코드 기본값에 의존하지 마세요. 배치 8개와 본문·프롬프트·출력을 수용하는 슬롯당 context를 확인하세요. LOTUS 짧은 요청으로 연결과 실제 서버의 출력 길이 인자 처리를 확인합니다.
+새 결과 폴더 `R`을 한 번 만들고 기준 커밋·패키지·데이터 fingerprint·서버 설정·GPU·캐시 절차를 기록하세요. `LLM_MODEL`은 확인한 70B 서비스의 `hosted_vllm/<실제 ID>`로 지정하고 8B 코드 기본값에 의존하지 마세요. 배치 8개와 본문·프롬프트·출력을 수용하는 슬롯당 context를 확인하세요. LOTUS 짧은 요청은 연결과 출력 길이 인자를 포함한 요청의 수락·응답만 확인합니다. 서버가 256토큰 상한을 실제로 적용하는지는 설정·버전·로그로 별도 확인하고, 확인되지 않으면 미확인으로 기록하세요.
 
 과거 기록의 70B 사용 V100 4장과 새 안내의 설치 V100 8장을 구분하세요. 시스템 RAM 48/96GB를 GPU VRAM으로 해석하지 마세요. 가중치·빌드·데이터 revision·캐시의 과거 동일성을 확인할 수 없다면 미확인으로 기록하고, 과거 대비 속도배수를 확정하지 마세요.
 
@@ -81,10 +81,10 @@ cat "$R/experiment5_conservative_workflow/status.json"
 
 | 보고할 값 | 읽을 위치·주의 |
 |---|---|
-| 논문 단위 품질·선택 수 | `comparison.json`의 `results[].vs_labels` TP/FP/FN/P/R/F1, `n_selected` |
+| 논문 단위 품질·선택 수 | `comparison.json`의 `results[].vs_labels` TP/FP/FN/precision/recall/f1, `results[].n_selected` |
 | 논리 LLM 비용 | `lm_calls`. HTTP 재시도·토큰 수와 다릅니다. Replay는 모의 비용이며 추가 실제 호출 0회 |
 | 순서 효과 | 첫 gold 순위와 첫 LLM 수락 순위를 구분. 미매칭 K회·생략 0회를 순위로 넣지 않으며 LLM 비교는 공통 ID·편수 표시 |
-| Pruning 손실 | `n_positive_pruned`, gate 양성 보존율, 최종 recall·F1, 4번 선택 gold ID − 5번 선택 gold ID. Replay/live를 구분 |
+| Pruning 손실 | Live `summary.json` 또는 replay JSON의 `summary`에서 `n_positive_pruned`·`positive_retention`, 공통 `results[].vs_labels`에서 recall·f1을 읽음. 추가 FN은 양쪽 `articles`의 선택 gold ID 차집합으로 계산. Replay/live를 구분 |
 | 주 실행시간 | 각 `실험명_workflow/total_wall_s.txt`. **단계별 시간을 더한 값으로 대체하지 않음** |
 | 보조 시간 | 각 score/calibrate/run `*_wall_s.txt`. 내부 `embedding_time_s`·`invocation_time_s`와 측정 범위 구분 |
 | Null 요약 | `test_e5_score.log`, `test_biolord_score.log`, `validation_biolord.log`, `test_biolord_exp5_score.log`의 `null_scores=` 개수·영향 논문 수·qids |
@@ -93,7 +93,7 @@ Runbook의 시간·순위 확인 Python을 실행하세요. 상태 `complete`, �
 
 주 시간에는 각 방법의 score·LLM 처리와 입출력·프로세스·묶음 내부 검증, **5번만 필요한 validation·보정**이 포함됩니다. 최초 다운로드·70B 기동·GPU/CPU 사전 시험·연결 점검·실측 후 replay/report는 제외합니다. 측정 중 추가 다운로드가 발생했다면 표시하세요.
 
-보고서는 3 live + 2 replay가 정상이고 `missing_experiments=[1,2]`, `vs_join_full=null`이 정상입니다. 과거 1·2의 미보고 P/R·선택 일치도·동일 ID witness는 복원할 수 없다고 적으세요. 과거 외부 시간과 현재 범위·서버·장비·캐시 차이가 불명확하면 과거는 참고값, 동일 현재 환경의 3~5를 주 시간 비교로 사용합니다. Validation 양성 100% 보존을 test 무누락 보장으로 설명하지 마세요.
+보고서는 3 live + 2 replay가 정상이고 `missing_experiments=[1,2]`, `vs_join_full=null`이 정상입니다. 과거 1·2의 P/R은 보고된 값이 없어 별도로 추정·인용하지 않습니다. 전체 선택 ID가 없어 선택 일치도·동일 ID witness는 복원할 수 없다고 적으세요. 과거 외부 시간과 현재 범위·서버·장비·캐시 차이가 불명확하면 과거는 참고값, 동일 현재 환경의 3~5를 주 시간 비교로 사용합니다. Validation 양성 100% 보존을 test 무누락 보장으로 설명하지 마세요.
 
 ## 6. 실패·재개와 백업
 
