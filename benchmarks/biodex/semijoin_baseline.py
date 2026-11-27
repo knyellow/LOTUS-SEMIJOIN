@@ -107,7 +107,7 @@ class CountingLM(LM):
 LLM_MODEL = os.environ.get("LLM_MODEL", "hosted_vllm/llama3.1-8b")
 
 
-def configure() -> CountingLM:
+def lm_config() -> dict:
     if LLM_MODEL.startswith("hosted_vllm/"):
         # local llama-server
         endpoint = {
@@ -117,18 +117,26 @@ def configure() -> CountingLM:
     else:
         # hosted API (e.g. gpt-4o-mini-2024-07-18), reads OPENAI_API_KEY
         endpoint = {"max_batch_size": 64}
-    lm = CountingLM(model=LLM_MODEL, temperature=0.0, max_tokens=256, **endpoint)
-    rm = SentenceTransformersRM(model="intfloat/e5-base-v2", max_batch_size=64, device="cpu")
+    return dict(model=LLM_MODEL, temperature=0.0, max_tokens=256, **endpoint)
+
+
+def configure(with_retriever: bool = True) -> CountingLM:
+    lm = CountingLM(**lm_config())
+    rm = SentenceTransformersRM(model="intfloat/e5-base-v2", max_batch_size=64, device="cpu") if with_retriever else None
     lotus.settings.configure(lm=lm, rm=rm, vs=FaissVS())
     return lm
 
 
-def load_articles(n: int) -> pd.DataFrame:
-    df = load_dataset("BioDEX/BioDEX-Reactions", split="test").to_pandas()[:n].reset_index(drop=True)
+def load_articles(n: int | None, split: str = "test", include_abstract: bool = False) -> pd.DataFrame:
+    df = load_dataset("BioDEX/BioDEX-Reactions", split=split).to_pandas()[:n].reset_index(drop=True)
     df["reactions_list"] = df["reactions"].apply(lambda x: [r.strip() for r in x.split(",")])
     df["patient_description"] = df["fulltext_processed"].apply(lambda x: x[:TRUNCATION_LIMIT])
     df["_qid"] = df.index
-    return df[["_qid", "title", "patient_description", "reactions_list"]]
+    columns = ["_qid", "title", "patient_description", "reactions_list"]
+    if include_abstract:
+        df["abstract"] = df["abstract"].fillna("")
+        columns.append("abstract")
+    return df[columns]
 
 
 def semi_join(articles: pd.DataFrame, reactions: pd.DataFrame, cascade_args: CascadeArgs | None):
@@ -173,7 +181,13 @@ def merge_full_chunks(n: int, chunk_dir: str) -> tuple[pd.DataFrame, int, float]
 EARLY_WORKERS = int(os.environ.get("EARLY_WORKERS", "4"))  # concurrent articles (match llama-server --parallel)
 
 
-def run_early_stop(articles: pd.DataFrame, reaction_list: list[str], lm: CountingLM, path: str):
+def run_early_stop(
+    articles: pd.DataFrame,
+    reaction_list: list[str],
+    lm: CountingLM,
+    path: str,
+    reaction_orders: dict[int, list[int]] | None = None,
+):
     """Early-stopping semi-join. One JSONL line per finished article, so reruns resume where they stopped.
 
     Articles run concurrently; within an article reactions are sequential, which also lets llama-server reuse the
@@ -189,7 +203,8 @@ def run_early_stop(articles: pd.DataFrame, reaction_list: list[str], lm: Countin
     def one(row) -> None:
         t = time.time()
         matched, calls = None, 0
-        for k in range(len(reaction_list)):
+        order = reaction_orders[row["_qid"]] if reaction_orders is not None else range(len(reaction_list))
+        for k in order:
             out = pairwise_join(
                 pd.Series([row["patient_description"]], name="patient_description"),
                 reactions.iloc[[k]],

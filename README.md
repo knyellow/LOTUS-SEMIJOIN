@@ -150,6 +150,18 @@ For more, you can checkout the official [docs](https://lotus-ai.readthedocs.io/e
 - [Optimizations](https://lotus-ai.readthedocs.io/en/latest/lazyframe.html) — the query engine, cascades, and lazy execution
 - [Supported Models](https://lotus-ai.readthedocs.io/en/latest/llm.html) — LMs, retrievers, rerankers (any [LiteLLM](https://litellm.vercel.app) provider)
 
+## BioDEX semi-join experiments (팀 프로젝트)
+
+기존 조기 종료 실행기에 E5·BioLORD의 라벨 정렬과 논문 단위 negative pruning을 연결합니다. 70B LLM은 기존 GPU 설정을 유지하고, 임베딩은 사전 시험을 통과한 GPU 한 장 또는 CPU를 선택해 통일합니다. 같은 초록 조각과 기존 본문 앞 8,000자를 사용합니다. 새 실측은 3→4→5 각 1회이며, 각 실험을 점수 생성부터 독립 측정하고 5번에는 validation·threshold 보정 시간도 포함합니다.
+
+| 읽을 문서 | 확인할 내용 |
+|---|---|
+| [서버 AI 실행 요청](benchmarks/biodex/SERVER_AI_EXPERIMENT_PROMPT.ko.md) | 다른 AI에 전달할 준비·3→4→5·분석·백업 지시문 |
+| [실험 개요](benchmarks/biodex/README.md) | 비교할 세 방법과 확정한 범위 |
+| [서버 실행 절차](benchmarks/biodex/NEGATIVE_PRUNING_RUNBOOK.ko.md) | 준비·실행·집계·시간 확인·재개 명령 |
+| [코드와 설계 설명](benchmarks/biodex/NEGATIVE_PRUNING_GUIDE.ko.md) | 구현 흐름, 선택 이유, 지표 해석 |
+| [기존 70B 기록](benchmarks/biodex/HISTORICAL_70B_RESULTS.ko.md) | 과거 1·2번 수치의 출처와 비교 한계 |
+
 ## Community
 Join us on [Discord][#discord] to ask questions and share what you're building.
 
